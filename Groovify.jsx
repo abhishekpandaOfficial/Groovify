@@ -983,6 +983,13 @@ export default function Groovify() {
     if (view === "browse") loadBrowse(industry, yearId, contentFilter);
   }, [view, industry, yearId, contentFilter, loadBrowse]);
 
+  const baseSongs = dedupe([
+    ...Object.values(catalog).flat(),
+    ...searchRes,
+    ...browseList,
+    ...artistUploads,
+  ]);
+
   /* ── Artist ── */
   const loadArtist = useCallback(async (name) => {
     setArtistView(name);
@@ -999,6 +1006,11 @@ export default function Groovify() {
     setLoadingKey("artist");
     const requestId = ++artistReqRef.current;
     const query = buildDiscoveryTerm(`${name} songs`, contentFilter);
+    const cachedMatches = baseSongs.filter((song) => {
+      const selectedArtist = normalizeArtistName(name).toLowerCase();
+      const songArtist = normalizeArtistName(song.artist).toLowerCase();
+      return songArtist === selectedArtist;
+    });
     const uploadedMatches = artistUploads.filter((song) => {
       const selectedArtist = normalizeArtistName(name).toLowerCase();
       const songArtist = normalizeArtistName(song.artist).toLowerCase();
@@ -1013,21 +1025,18 @@ export default function Groovify() {
       contentFilter
     );
     if (requestId !== artistReqRef.current) return;
-    const merged = dedupe([...uploadedMatches, ...r]);
+    const merged = dedupe([...cachedMatches, ...uploadedMatches, ...r]);
     artistCacheRef.current.set(cacheKey, merged);
     setArtistSongs(merged);
     queueRef.current = merged;
     setLoadingKey(null);
-  }, [artistUploads, contentFilter, runQuery]);
+  }, [artistUploads, baseSongs, contentFilter, runQuery]);
 
   const withYear = (list) => applyYearFilter(applyContentFilter(list, contentFilter), yearId);
 
   const allSongs = dedupe([
-    ...Object.values(catalog).flat(),
-    ...searchRes,
-    ...browseList,
+    ...baseSongs,
     ...artistSongs,
-    ...artistUploads,
   ]);
   const activeQueue = queueRef.current;
   const searchSongs = withYear(searchRes);
@@ -1042,6 +1051,34 @@ export default function Groovify() {
         activeQueue[(activeQueueIndex + offset + 1 + activeQueue.length) % activeQueue.length]
       ).filter(Boolean)
     : [];
+  const artistsIndex = Array.from(new Map(
+    dedupe([
+      ...allSongs,
+      ...recentlyPlayed,
+    ])
+      .filter((song) => song.artist)
+      .map((song) => {
+        const normalizedName = normalizeArtistName(song.artist);
+        return [normalizedName.toLowerCase(), {
+          name: normalizedName,
+          art: song.artBig || song.art || song.artSm || "",
+          songs: dedupe(allSongs.filter((entry) =>
+            normalizeArtistName(entry.artist).toLowerCase() === normalizedName.toLowerCase()
+          )),
+        }];
+      })
+  ).values()).sort((a, b) => a.name.localeCompare(b.name));
+  const allArtists = Array.from(new Map([
+    ...FEATURED_ARTISTS.map((name) => {
+      const normalizedName = normalizeArtistName(name);
+      const existing = artistsIndex.find((artist) => artist.name.toLowerCase() === normalizedName.toLowerCase());
+      return [normalizedName.toLowerCase(), existing || { name: normalizedName, art: "", songs: [] }];
+    }),
+    ...artistsIndex.map((artist) => [artist.name.toLowerCase(), artist]),
+  ]).values());
+  const currentArtistMeta = allArtists.find((artist) =>
+    artistView && artist.name.toLowerCase() === normalizeArtistName(artistView).toLowerCase()
+  );
 
   const ac = INDUSTRIES.find(i => i.id === industry)?.color || "#6366F1";
 
@@ -1786,21 +1823,33 @@ export default function Groovify() {
               <div className="slide">
                 <h2 style={{ fontSize:22, fontWeight:700, marginBottom:8, color:t.text }}>Artists</h2>
                 <p style={{ fontSize:13, color:t.textMuted, marginBottom:22 }}>
-                  Click any artist to load their full discography
+                  Browse every artist discovered in Groovify and open their songs
                 </p>
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  {Array.from(new Set([
-                    ...FEATURED_ARTISTS,
-                    ...artistUploads.map((song) => song.artist),
-                  ])).map(a => (
-                    <button key={a} onClick={() => loadArtist(a)}
-                      style={{ padding:"8px 16px", borderRadius:22,
-                        border:`1px solid ${t.sideB}`, background:t.hover,
-                        color:t.textSub, fontSize:13, fontWeight:500,
-                        transition:"all .15s" }}
-                      onMouseEnter={e => { e.currentTarget.style.background=`rgba(99,102,241,.12)`; e.currentTarget.style.color="#6366F1"; e.currentTarget.style.borderColor="rgba(99,102,241,.35)"; }}
-                      onMouseLeave={e => { e.currentTarget.style.background=t.hover; e.currentTarget.style.color=t.textSub; e.currentTarget.style.borderColor=t.sideB; }}>
-                      {a}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))", gap:16 }}>
+                  {allArtists.map((artist) => (
+                    <button key={artist.name} onClick={() => loadArtist(artist.name)}
+                      style={{ textAlign:"left", padding:0, borderRadius:18, overflow:"hidden",
+                        border:`1px solid ${t.sideB}`, background:t.card, cursor:"pointer" }}>
+                      <div style={{ aspectRatio:"1", background:t.skelA }}>
+                        {artist.art
+                          ? <Img src={artist.art} style={{ width:"100%", height:"100%" }} />
+                          : <div style={{ width:"100%", height:"100%",
+                              background:"linear-gradient(135deg,#6366F1,#8B5CF6)",
+                              display:"flex", alignItems:"center", justifyContent:"center",
+                              fontSize:40, fontWeight:900, color:"#fff" }}>
+                              {artist.name[0]}
+                            </div>
+                        }
+                      </div>
+                      <div style={{ padding:"12px 14px 14px" }}>
+                        <div style={{ fontSize:14, fontWeight:700, color:t.text, marginBottom:4,
+                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          {artist.name}
+                        </div>
+                        <div style={{ fontSize:11.5, color:t.textMuted }}>
+                          {artist.songs.length} songs
+                        </div>
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -1819,8 +1868,8 @@ export default function Groovify() {
                 <div style={{ display:"flex", alignItems:"center", gap:18, marginBottom:26 }}>
                   <div style={{ width:84, height:84, borderRadius:"50%", overflow:"hidden",
                     flexShrink:0, background:t.skelA }}>
-                    {artistList[0]?.art
-                      ? <Img src={artistList[0].art} style={{ width:84, height:84 }} />
+                    {currentArtistMeta?.art || artistList[0]?.art
+                      ? <Img src={currentArtistMeta?.art || artistList[0]?.art} style={{ width:84, height:84 }} />
                       : <div style={{ width:84, height:84,
                           background:"linear-gradient(135deg,#6366F1,#8B5CF6)",
                           display:"flex", alignItems:"center", justifyContent:"center",
@@ -1832,7 +1881,7 @@ export default function Groovify() {
                   <div>
                     <div style={{ fontSize:26, fontWeight:800, color:t.text }}>{artistView}</div>
                     <div style={{ fontSize:13, color:t.textMuted, marginTop:4 }}>
-                      {artistList.length} tracks
+                      {(artistList.length || currentArtistMeta?.songs.length || 0)} tracks
                     </div>
                   </div>
                 </div>
