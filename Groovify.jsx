@@ -37,13 +37,27 @@ const applyContentFilter = (list, contentFilter) => {
   if (contentFilter === "full") return list.filter((song) => !song.isPreview);
   if (contentFilter === "remix") return list.filter((song) => matchesToken(song, "remix"));
   if (contentFilter === "mashup") return list.filter((song) => matchesToken(song, "mashup"));
+  if (contentFilter === "producer") {
+    return list.filter((song) =>
+      matchesToken(song, "producer") ||
+      matchesToken(song, "produced") ||
+      matchesToken(song, "beat") ||
+      matchesToken(song, "dj")
+    );
+  }
   return list;
 };
 
 const buildDiscoveryTerm = (term, contentFilter) => {
   if (contentFilter === "remix") return `${term} remix`;
   if (contentFilter === "mashup") return `${term} mashup`;
+  if (contentFilter === "producer") return `${term} produced by`;
   return term;
+};
+
+const STORAGE_KEYS = {
+  session: "groovify_session_v1",
+  users: "groovify_users_v1",
 };
 
 // ═══════════════════════════════ MAIN ════════════════════════════
@@ -66,6 +80,11 @@ export default function Groovify() {
   const [yearId,      setYearId]      = useState(null);
   const [contentFilter, setContentFilter] = useState("full");
   const [liked,       setLiked]       = useState(new Set());
+  const [authMode,    setAuthMode]    = useState("login");
+  const [authOpen,    setAuthOpen]    = useState(false);
+  const [authForm,    setAuthForm]    = useState({ name:"", email:"", password:"" });
+  const [authError,   setAuthError]   = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
   const [current,     setCurrent]     = useState(null);
   const [playing,     setPlaying]     = useState(false);
   const [progress,    setProgress]    = useState(0);
@@ -105,6 +124,31 @@ export default function Groovify() {
   useEffect(() => {
     try { localStorage.setItem("groovify_theme", dark ? "dark" : "light"); } catch {}
   }, [dark]);
+  useEffect(() => {
+    try {
+      const savedSession = localStorage.getItem(STORAGE_KEYS.session);
+      if (savedSession) {
+        const parsed = JSON.parse(savedSession);
+        setCurrentUser(parsed);
+        setLiked(new Set(parsed.savedSongIds || []));
+      }
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      if (!currentUser) {
+        localStorage.removeItem(STORAGE_KEYS.session);
+        return;
+      }
+      const nextUser = { ...currentUser, savedSongIds: Array.from(liked) };
+      setCurrentUser(nextUser);
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(nextUser));
+
+      const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.users) || "[]");
+      const nextUsers = users.map((user) => user.email === nextUser.email ? nextUser : user);
+      localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(nextUsers));
+    } catch {}
+  }, [liked]);
 
   /* ── Mobile ── */
   useEffect(() => {
@@ -171,7 +215,83 @@ export default function Groovify() {
     a.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (a.duration || 30);
   };
 
-  const toggleLike = id => setLiked(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const openAuth = (mode = "login") => {
+    setAuthMode(mode);
+    setAuthError("");
+    setAuthOpen(true);
+  };
+
+  const handleAuthSubmit = () => {
+    const email = authForm.email.trim().toLowerCase();
+    const password = authForm.password.trim();
+    const name = authForm.name.trim();
+
+    if (!email || !password || (authMode === "signup" && !name)) {
+      setAuthError("Fill in all required fields.");
+      return;
+    }
+
+    try {
+      const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.users) || "[]");
+      if (authMode === "signup") {
+        if (users.some((user) => user.email === email)) {
+          setAuthError("An account with this email already exists.");
+          return;
+        }
+        const newUser = {
+          name,
+          email,
+          password,
+          savedSongIds: [],
+        };
+        localStorage.setItem(STORAGE_KEYS.users, JSON.stringify([...users, newUser]));
+        localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(newUser));
+        setCurrentUser(newUser);
+        setLiked(new Set());
+        setAuthOpen(false);
+        setAuthForm({ name:"", email:"", password:"" });
+        showToast(`Welcome, ${name}!`, "info");
+        return;
+      }
+
+      const matchedUser = users.find((user) => user.email === email && user.password === password);
+      if (!matchedUser) {
+        setAuthError("Invalid email or password.");
+        return;
+      }
+      localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(matchedUser));
+      setCurrentUser(matchedUser);
+      setLiked(new Set(matchedUser.savedSongIds || []));
+      setAuthOpen(false);
+      setAuthForm({ name:"", email:"", password:"" });
+      showToast(`Welcome back, ${matchedUser.name}!`, "info");
+    } catch {
+      setAuthError("Unable to access local account storage.");
+    }
+  };
+
+  const signOut = () => {
+    setCurrentUser(null);
+    setLiked(new Set());
+    setAuthOpen(false);
+    setAuthError("");
+    setAuthForm({ name:"", email:"", password:"" });
+    try { localStorage.removeItem(STORAGE_KEYS.session); } catch {}
+    showToast("Signed out.", "info");
+  };
+
+  const toggleLike = (id) => {
+    if (!currentUser) {
+      openAuth("signup");
+      showToast("Create an account to save songs.", "info");
+      return;
+    }
+    setLiked((p) => {
+      const n = new Set(p);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  };
 
   const runQuery = useCallback(async (term, {
     fallbackToMixed = false,
@@ -306,8 +426,12 @@ export default function Groovify() {
     setView("search");
     searchTmr.current = setTimeout(async () => {
       const requestId = ++searchReqRef.current;
-      const query = buildDiscoveryTerm(`${trimmed} songs india`, contentFilter);
-      const cacheKey = `${contentFilter}::${trimmed.toLowerCase()}`;
+      const industryLabel = industry !== "all"
+        ? INDUSTRIES.find((entry) => entry.id === industry)?.label || ""
+        : "";
+      const baseSearch = [trimmed, industryLabel, "songs"].filter(Boolean).join(" ");
+      const query = buildDiscoveryTerm(baseSearch, contentFilter);
+      const cacheKey = `${industry}::${contentFilter}::${trimmed.toLowerCase()}`;
       if (searchCacheRef.current.has(cacheKey)) {
         const cached = searchCacheRef.current.get(cacheKey);
         setSearchRes(cached);
@@ -331,7 +455,7 @@ export default function Groovify() {
       setLoadingKey(null);
     }, 150);
     return () => clearTimeout(searchTmr.current);
-  }, [searchQ, contentFilter, runQuery, view]);
+  }, [searchQ, contentFilter, industry, runQuery, view]);
 
   /* ── Browse ── */
   const loadBrowse = useCallback(async (ind, yr, kind) => {
@@ -362,7 +486,7 @@ export default function Groovify() {
 
     let out = applyContentFilter(applyYearFilter(baseSongs, yr), kind);
 
-    if (!out.length && (kind === "remix" || kind === "mashup")) {
+    if (!out.length && (kind === "remix" || kind === "mashup" || kind === "producer")) {
       const songs = [];
       for (const sec of relevantSections.slice(0, 4)) {
         for (const q of sec.queries.slice(0, 2)) {
@@ -425,10 +549,13 @@ export default function Groovify() {
     ...browseList,
     ...artistSongs,
   ]);
+  const activeQueue = queueRef.current;
   const searchSongs = withYear(searchRes);
   const artistList = withYear(artistSongs);
   const librarySongs = withYear(allSongs);
-  const activeQueue = queueRef.current;
+  const savedSongs = librarySongs.filter((song) => liked.has(song.id));
+  const queueSongs = withYear(activeQueue);
+  const recentSongs = withYear(recentlyPlayed);
   const activeQueueIndex = idxRef.current;
   const upcomingQueue = activeQueue.length > 1
     ? Array.from({ length: Math.min(activeQueue.length - 1, 8) }, (_, offset) =>
@@ -481,6 +608,62 @@ export default function Groovify() {
         </div>
       )}
 
+      {authOpen && (
+        <div style={{ position:"fixed", inset:0, zIndex:9998, background:"rgba(0,0,0,.55)",
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ width:"100%", maxWidth:420, borderRadius:22, padding:24,
+            background:dark ? "rgba(13,13,24,.98)" : "rgba(255,255,255,.98)",
+            border:`1px solid ${t.sideB}`, boxShadow:"0 24px 80px rgba(0,0,0,.35)" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:18 }}>
+              <Brand t={t} size={30} compact />
+              <button onClick={() => setAuthOpen(false)}
+                style={{ background:"none", border:"none", color:t.textMuted, fontSize:18 }}>✕</button>
+            </div>
+            <div style={{ fontSize:22, fontWeight:800, color:t.text, marginBottom:6 }}>
+              {authMode === "signup" ? "Create your account" : "Welcome back"}
+            </div>
+            <div style={{ fontSize:13, color:t.textSub, lineHeight:1.6, marginBottom:16 }}>
+              Save songs, keep your likes on this device, and build your own Groovify library.
+            </div>
+            {authMode === "signup" && (
+              <input value={authForm.name} onChange={(e) => setAuthForm((prev) => ({ ...prev, name:e.target.value }))}
+                placeholder="Your name"
+                style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                  borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+            )}
+            <input value={authForm.email} onChange={(e) => setAuthForm((prev) => ({ ...prev, email:e.target.value }))}
+              placeholder="Email"
+              style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+            <input type="password" value={authForm.password} onChange={(e) => setAuthForm((prev) => ({ ...prev, password:e.target.value }))}
+              placeholder="Password"
+              style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+            {authError && (
+              <div style={{ fontSize:12, color:"#F87171", marginBottom:12 }}>{authError}</div>
+            )}
+            <button onClick={handleAuthSubmit}
+              style={{ width:"100%", padding:"12px 16px", borderRadius:14, border:"none",
+                background:"linear-gradient(135deg,#6366F1,#4F46E5)", color:"#fff",
+                fontSize:13.5, fontWeight:800, marginBottom:12 }}>
+              {authMode === "signup" ? "Sign Up" : "Login"}
+            </button>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:12 }}>
+              <button onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(""); }}
+                style={{ background:"none", border:"none", color:"#6366F1", fontSize:12.5, fontWeight:700 }}>
+                {authMode === "signup" ? "Already have an account?" : "Create a new account"}
+              </button>
+              {currentUser && (
+                <button onClick={signOut}
+                  style={{ background:"none", border:"none", color:t.textMuted, fontSize:12.5, fontWeight:700 }}>
+                  Sign Out
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
 
         {/* ══════════════ SIDEBAR ══════════════ */}
@@ -514,6 +697,7 @@ export default function Groovify() {
                 { id:"search",  icon:"⌕",  label:"Search" },
                 { id:"browse",  icon:"◈",  label:"Browse" },
                 { id:"artists", icon:"◉",  label:"Artists" },
+                { id:"saved",   icon:"♥",  label:"Saved", badge: currentUser ? savedSongs.length || null : null },
                 { id:"queue",   icon:"≡",  label:"Queue", badge: upcomingQueue.length || null },
                 { id:"recent",  icon:"⟳",  label:"Recent", badge: recentlyPlayed.length || null },
                 { id:"library", icon:"♫",  label:"Library", badge: allSongs.length || null },
@@ -555,6 +739,42 @@ export default function Groovify() {
             {/* Refresh */}
             <div style={{ padding:"14px 16px 18px", marginTop:"auto",
               borderTop:`1px solid ${t.sideB}` }}>
+              <div style={{ marginBottom:12, padding:"10px 12px", borderRadius:12,
+                background:t.hover, border:`1px solid ${t.sideB}` }}>
+                {currentUser ? (
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    <div style={{ width:34, height:34, borderRadius:"50%", background:"#6366F1",
+                      color:"#fff", display:"flex", alignItems:"center", justifyContent:"center",
+                      fontSize:13, fontWeight:800, flexShrink:0 }}>
+                      {currentUser.name?.[0]?.toUpperCase() || "G"}
+                    </div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:12.5, color:t.text, fontWeight:700,
+                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {currentUser.name}
+                      </div>
+                      <div style={{ fontSize:10.5, color:t.textMuted,
+                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {currentUser.email}
+                      </div>
+                    </div>
+                    <button onClick={signOut}
+                      style={{ background:"none", border:"none", color:t.textMuted, fontSize:12, fontWeight:700 }}>
+                      Exit
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ fontSize:12.5, color:t.text, fontWeight:700, marginBottom:4 }}>
+                      Save songs with a Groovify account
+                    </div>
+                    <button onClick={() => openAuth("signup")}
+                      style={{ background:"none", border:"none", color:"#6366F1", fontSize:12.5, fontWeight:700, padding:0 }}>
+                      Login / Sign Up
+                    </button>
+                  </div>
+                )}
+              </div>
               <button onClick={() => loadCatalog(true)} disabled={refreshing}
                 style={{ width:"100%", padding:"9px", borderRadius:10,
                   border:`1px solid ${t.sideB}`, background:t.hover,
@@ -617,6 +837,27 @@ export default function Groovify() {
 
               {/* Theme toggle + panel */}
               <div style={{ display:"flex", gap:8, alignItems:"center", flexShrink:0 }}>
+                {currentUser ? (
+                  <button onClick={() => setView("saved")}
+                    style={{ padding:"8px 12px", borderRadius:20,
+                      border:`1px solid ${t.sideB}`, background:t.hover,
+                      color:t.textSub, fontSize:12, fontWeight:600,
+                      display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ width:24, height:24, borderRadius:"50%", background:"#6366F1",
+                      color:"#fff", display:"inline-flex", alignItems:"center", justifyContent:"center",
+                      fontSize:11, fontWeight:800, flexShrink:0 }}>
+                      {currentUser.name?.[0]?.toUpperCase() || "G"}
+                    </span>
+                    {!mobile && <span>{currentUser.name}</span>}
+                  </button>
+                ) : (
+                  <button onClick={() => openAuth("signup")}
+                    style={{ padding:"8px 12px", borderRadius:20,
+                      border:`1px solid ${t.sideB}`, background:t.hover,
+                      color:t.textSub, fontSize:12, fontWeight:600 }}>
+                    Login / Sign Up
+                  </button>
+                )}
                 <button onClick={() => setDark(d => !d)}
                   style={{ width:38, height:38, borderRadius:"50%",
                     border:`1px solid ${t.sideB}`, background:t.hover,
@@ -639,7 +880,7 @@ export default function Groovify() {
             </div>
 
             {/* Filters */}
-            {(view === "browse" || view === "search" || view === "library" || view === "artist") && (
+            {(view === "browse" || view === "search" || view === "library" || view === "artist" || view === "saved" || view === "queue" || view === "recent") && (
               <div style={{ display:"flex", flexDirection:"column", gap:8, padding:"12px 20px" }}>
                 <div style={{ display:"flex", gap:6, overflowX:"auto", flexWrap:"nowrap" }}>
                   {CONTENT_FILTERS.map((filter) => (
@@ -704,11 +945,14 @@ export default function Groovify() {
                   </div>
                   <p style={{ fontSize:13, color:dark?"rgba(232,232,248,.38)":"rgba(20,20,42,.45)",
                     lineHeight:1.75, maxWidth:520, marginBottom:22, position:"relative" }}>
-                    Bollywood · Telugu · Odia · Punjabi · Tamil · Folk · Devotional · Classics
+                    Bollywood · Telugu · English · Spanish · Afro · World Folk · Producer Cuts
                     <br />Auto-refreshes daily · Real album art · Background playback
                   </p>
+                  <div style={{ fontSize:11.5, color:t.textMuted, marginBottom:18, position:"relative", maxWidth:560 }}>
+                    Full playback is sourced from open providers like Audius. Spotify-style account syncing and licensed Spotify full-track streaming are not part of this build.
+                  </div>
                   <div style={{ display:"flex", gap:9, flexWrap:"wrap", position:"relative" }}>
-                    {INDUSTRIES.slice(1, 7).map(i => (
+                    {INDUSTRIES.slice(1, 9).map(i => (
                       <button key={i.id}
                         onClick={() => { setIndustry(i.id); setView("browse"); }}
                         style={{ padding:"8px 16px", borderRadius:20,
@@ -948,14 +1192,56 @@ export default function Groovify() {
               </div>
             )}
 
+            {/* ─ SAVED ─ */}
+            {view === "saved" && (
+              <div className="slide">
+                <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22, flexWrap:"wrap" }}>
+                  <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>♥ Saved Songs</h2>
+                  <span style={{ fontSize:12, color:t.textMuted }}>
+                    {currentUser ? `${savedSongs.length} saved` : "Sign in required"}
+                  </span>
+                </div>
+                {!currentUser ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:48, marginBottom:14 }}>🔐</div>
+                    <div style={{ fontSize:20, fontWeight:700 }}>Login to save songs</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Your saved songs stay tied to your Groovify account on this device</div>
+                    <button onClick={() => openAuth("signup")}
+                      style={{ marginTop:18, padding:"10px 18px", borderRadius:20, border:"none",
+                        background:"#6366F1", color:"#fff", fontSize:13, fontWeight:700 }}>
+                      Create Account
+                    </button>
+                  </div>
+                ) : savedSongs.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:48, marginBottom:14 }}>♥</div>
+                    <div style={{ fontSize:20, fontWeight:700 }}>No saved songs yet</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Tap the heart on any track to keep it in your account</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    {savedSongs.map((s, i) => (
+                      <SongRow key={s.id} song={s} num={i+1} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={true}
+                        fmtTime={fmtTime}
+                        onPlay={() => playSong(s, savedSongs)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ─ QUEUE ─ */}
             {view === "queue" && (
               <div className="slide">
                 <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22, flexWrap:"wrap" }}>
                   <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>≡ Queue</h2>
-                  <span style={{ fontSize:12, color:t.textMuted }}>{activeQueue.length} songs</span>
+                  <span style={{ fontSize:12, color:t.textMuted }}>{queueSongs.length} songs</span>
                 </div>
-                {activeQueue.length === 0 ? (
+                {queueSongs.length === 0 ? (
                   <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
                     <div style={{ fontSize:48, marginBottom:14 }}>≡</div>
                     <div style={{ fontSize:20, fontWeight:700 }}>Queue is empty</div>
@@ -963,13 +1249,13 @@ export default function Groovify() {
                   </div>
                 ) : (
                   <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
-                    {activeQueue.map((s, i) => (
+                    {queueSongs.map((s, i) => (
                       <SongRow key={`${s.id}-${i}`} song={s} num={i+1} t={t}
                         isCurrent={current?.id === s.id}
                         isPlaying={current?.id === s.id && playing}
                         liked={liked.has(s.id)}
                         fmtTime={fmtTime}
-                        onPlay={() => playSong(s, activeQueue)}
+                        onPlay={() => playSong(s, queueSongs)}
                         onLike={() => toggleLike(s.id)} />
                     ))}
                   </div>
@@ -982,9 +1268,9 @@ export default function Groovify() {
               <div className="slide">
                 <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22, flexWrap:"wrap" }}>
                   <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>⟳ Recently Played</h2>
-                  <span style={{ fontSize:12, color:t.textMuted }}>{recentlyPlayed.length} songs</span>
+                  <span style={{ fontSize:12, color:t.textMuted }}>{recentSongs.length} songs</span>
                 </div>
-                {recentlyPlayed.length === 0 ? (
+                {recentSongs.length === 0 ? (
                   <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
                     <div style={{ fontSize:48, marginBottom:14 }}>⟳</div>
                     <div style={{ fontSize:20, fontWeight:700 }}>No recent songs yet</div>
@@ -992,13 +1278,13 @@ export default function Groovify() {
                   </div>
                 ) : (
                   <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
-                    {recentlyPlayed.map((s, i) => (
+                    {recentSongs.map((s, i) => (
                       <SongRow key={`${s.id}-${i}`} song={s} num={i+1} t={t}
                         isCurrent={current?.id === s.id}
                         isPlaying={current?.id === s.id && playing}
                         liked={liked.has(s.id)}
                         fmtTime={fmtTime}
-                        onPlay={() => playSong(s, recentlyPlayed)}
+                        onPlay={() => playSong(s, recentSongs)}
                         onLike={() => toggleLike(s.id)} />
                     ))}
                   </div>

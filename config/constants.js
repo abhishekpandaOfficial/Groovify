@@ -6,7 +6,12 @@ const CATALOG = [
   { key:"punjabi",    label:"🎵 Punjabi",    queries:["Punjabi hit songs","Diljit Dosanjh songs","Karan Aujla songs"],           cat:"punjabi" },
   { key:"tamil",      label:"🎭 Tamil",      queries:["Tamil hit songs","AR Rahman Tamil","Anirudh songs"],                     cat:"tamil" },
   { key:"kannada",    label:"🎶 Kannada",    queries:["Kannada hit songs","KGF songs","Ravi Basrur songs"],                     cat:"kannada" },
+  { key:"english",    label:"🌐 English",    queries:["English pop hits","global english songs","indie pop english"],            cat:"english" },
+  { key:"spanish",    label:"💃 Spanish",    queries:["Spanish pop hits","latin hits","reggaeton popular songs"],               cat:"spanish" },
+  { key:"afro",       label:"🔥 Afro",       queries:["Afrobeats hits","afro pop songs","nigerian hit songs"],                  cat:"afro" },
   { key:"folk",       label:"🪘 Folk",       queries:["Indian folk songs","Baul songs Bengal","Garba Gujarati folk"],            cat:"folk" },
+  { key:"worldfolk",  label:"🌍 World Folk", queries:["Irish folk songs","Arabic folk songs","Latin folk songs"],               cat:"worldfolk" },
+  { key:"producer",   label:"🎛 Producer Cuts", queries:["produced by metro boomin songs","anirudh producer songs","dj remix producer tracks"], cat:"producer" },
   { key:"classic",    label:"🏆 Classics",   queries:["Lata Mangeshkar songs","Kishore Kumar songs","90s Bollywood songs"],      cat:"classic" },
   { key:"devotional", label:"🙏 Devotional", queries:["Bhakti songs Hindi","Jagannath bhajan","Bhajan songs India"],             cat:"devotional" },
 ];
@@ -19,7 +24,12 @@ const INDUSTRIES = [
   { id:"punjabi",   label:"Punjabi",    emoji:"🎵", color:"#F97316" },
   { id:"tamil",     label:"Tamil",      emoji:"🎭", color:"#8B5CF6" },
   { id:"kannada",   label:"Kannada",    emoji:"🎶", color:"#06B6D4" },
+  { id:"english",   label:"English",    emoji:"🌐", color:"#3B82F6" },
+  { id:"spanish",   label:"Spanish",    emoji:"💃", color:"#E11D48" },
+  { id:"afro",      label:"Afro",       emoji:"🔥", color:"#F97316" },
   { id:"folk",      label:"Folk",       emoji:"🪘", color:"#D97706" },
+  { id:"worldfolk", label:"World Folk", emoji:"🌍", color:"#0F766E" },
+  { id:"producer",  label:"Producer",   emoji:"🎛", color:"#A855F7" },
   { id:"classic",   label:"Classics",   emoji:"🏆", color:"#EC4899" },
   { id:"devotional",label:"Devotional", emoji:"🙏", color:"#22C55E" },
 ];
@@ -44,6 +54,7 @@ const CONTENT_FILTERS = [
   { id:"full",   label:"Full Songs" },
   { id:"remix",  label:"Remix" },
   { id:"mashup", label:"Mashup" },
+  { id:"producer", label:"Producer" },
 ];
 
 export { CATALOG, CONTENT_FILTERS, INDUSTRIES, YEARS };
