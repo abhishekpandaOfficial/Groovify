@@ -7,6 +7,19 @@ import Brand from "./components/Brand";
 import SongCard from "./components/SongCard";
 import SongRow from "./components/SongRow";
 import { dedupe, fetchBoth, findPreviewFallback, refreshSongStream } from "./utils/api";
+import { FEATURED_ARTISTS, formatArtistSong, normalizeArtistName } from "./utils/artistProfiles";
+import {
+  fetchProfile,
+  isSupabaseConfigured,
+  listPublishedSongs,
+  publishArtistSong,
+  signInWithEmail,
+  signOutUser,
+  signUpWithEmail,
+  supabase,
+  upsertProfile,
+  uploadArtistAsset,
+} from "./utils/supabase";
 
 const fmtTime = (s) => {
   if (!s || Number.isNaN(s)) return "0:00";
@@ -65,6 +78,24 @@ const STORAGE_KEYS = {
   session: "groovify_session",
 };
 
+const buildAuthUser = (sessionUser, profile) => ({
+  id: sessionUser.id,
+  email: sessionUser.email || profile?.email || "",
+  name: profile?.full_name || sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || "Groovify User",
+  full_name: profile?.full_name || sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || "",
+  avatar_url: profile?.avatar_url || sessionUser.user_metadata?.avatar_url || "",
+  role: profile?.role || sessionUser.user_metadata?.role || "listener",
+  bio: profile?.bio || "",
+  country: profile?.country || "",
+  languages: profile?.languages || [],
+  genres: profile?.genres || [],
+  stage_name: profile?.stage_name || "",
+  website: profile?.website || "",
+  wiki_url: profile?.wiki_url || "",
+  savedSongIds: profile?.saved_song_ids || [],
+  emailVerified: Boolean(sessionUser.email_confirmed_at),
+});
+
 // ═══════════════════════════════ MAIN ════════════════════════════
 export default function Groovify() {
   const [dark, setDark]         = useState(() => {
@@ -87,9 +118,34 @@ export default function Groovify() {
   const [liked,       setLiked]       = useState(new Set());
   const [authMode,    setAuthMode]    = useState("login");
   const [authOpen,    setAuthOpen]    = useState(false);
-  const [authForm,    setAuthForm]    = useState({ name:"", email:"", password:"" });
+  const [authForm,    setAuthForm]    = useState({ name:"", email:"", password:"", role:"listener" });
   const [authError,   setAuthError]   = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const [artistUploads, setArtistUploads] = useState([]);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileForm, setProfileForm] = useState({
+    role: "listener",
+    stageName: "",
+    bio: "",
+    country: "",
+    languages: "",
+    genres: "",
+    website: "",
+  });
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadSaving, setUploadSaving] = useState(false);
+  const [uploadForm, setUploadForm] = useState({
+    title: "",
+    album: "",
+    genre: "",
+    language: "",
+    releaseYear: "",
+    creditName: "",
+    coverFile: null,
+    audioFile: null,
+  });
   const [supportOpen, setSupportOpen] = useState(false);
   const [supportLoading, setSupportLoading] = useState(false);
   const [supportCurrency, setSupportCurrency] = useState("INR");
@@ -131,6 +187,19 @@ export default function Groovify() {
   const supportMinimum = SUPPORT_MINIMUMS[supportCurrency];
   const supportAmountValid = Number.isFinite(supportAmount) && supportAmount >= supportMinimum;
   const supportAmountLabel = supportCurrency === "INR" ? `Rs${supportMinimum}` : `$${supportMinimum}`;
+  const artistProfileComplete = Boolean(
+    currentUser?.role === "artist" &&
+    currentUser?.stage_name &&
+    currentUser?.bio &&
+    currentUser?.country &&
+    currentUser?.genres?.length
+  );
+  const canUploadSongs = Boolean(
+    isSupabaseConfigured &&
+    currentUser?.role === "artist" &&
+    currentUser?.emailVerified &&
+    artistProfileComplete
+  );
 
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
   useEffect(() => { repeatRef.current  = repeat;  }, [repeat]);
@@ -139,6 +208,51 @@ export default function Groovify() {
     try { localStorage.setItem("groovify_theme", dark ? "dark" : "light"); } catch {}
   }, [dark]);
   useEffect(() => {
+    if (isSupabaseConfigured && supabase) {
+      let alive = true;
+
+      const syncSupabaseUser = async (sessionUser) => {
+        if (!alive) return;
+        if (!sessionUser) {
+          setCurrentUser(null);
+          setLiked(new Set());
+          return;
+        }
+
+        try {
+          let profile = await fetchProfile(sessionUser.id);
+          if (!profile) {
+            profile = await upsertProfile({
+              id: sessionUser.id,
+              email: sessionUser.email,
+              full_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || "",
+              role: sessionUser.user_metadata?.role || "listener",
+            });
+          }
+          const nextUser = buildAuthUser(sessionUser, profile);
+          setCurrentUser(nextUser);
+          setLiked(new Set(nextUser.savedSongIds || []));
+        } catch {
+          const nextUser = buildAuthUser(sessionUser, null);
+          setCurrentUser(nextUser);
+          setLiked(new Set(nextUser.savedSongIds || []));
+        }
+      };
+
+      supabase.auth.getSession().then(({ data }) => {
+        syncSupabaseUser(data.session?.user || null);
+      });
+
+      const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+        syncSupabaseUser(session?.user || null);
+      });
+
+      return () => {
+        alive = false;
+        authListener.subscription.unsubscribe();
+      };
+    }
+
     try {
       const savedSession = localStorage.getItem(STORAGE_KEYS.session);
       if (savedSession) {
@@ -149,13 +263,34 @@ export default function Groovify() {
     } catch {}
   }, []);
   useEffect(() => {
+    if (!currentUser) {
+      try { localStorage.removeItem(STORAGE_KEYS.session); } catch {}
+      return;
+    }
+
+    const savedSongIds = Array.from(liked);
+    setCurrentUser((prev) => prev ? { ...prev, savedSongIds } : prev);
+
+    if (isSupabaseConfigured && currentUser.id) {
+      upsertProfile({
+        id: currentUser.id,
+        email: currentUser.email,
+        full_name: currentUser.full_name || currentUser.name,
+        role: currentUser.role || "listener",
+        bio: currentUser.bio || "",
+        country: currentUser.country || "",
+        languages: currentUser.languages || [],
+        genres: currentUser.genres || [],
+        stage_name: currentUser.stage_name || "",
+        website: currentUser.website || "",
+        wiki_url: currentUser.wiki_url || "",
+        saved_song_ids: savedSongIds,
+      }).catch(() => {});
+      return;
+    }
+
     try {
-      if (!currentUser) {
-        localStorage.removeItem(STORAGE_KEYS.session);
-        return;
-      }
-      const nextUser = { ...currentUser, savedSongIds: Array.from(liked) };
-      setCurrentUser(nextUser);
+      const nextUser = { ...currentUser, savedSongIds };
       localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(nextUser));
 
       const users = JSON.parse(localStorage.getItem(STORAGE_KEYS.users) || "[]");
@@ -163,6 +298,35 @@ export default function Groovify() {
       localStorage.setItem(STORAGE_KEYS.users, JSON.stringify(nextUsers));
     } catch {}
   }, [liked]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    setProfileForm({
+      role: currentUser.role || "listener",
+      stageName: currentUser.stage_name || "",
+      bio: currentUser.bio || "",
+      country: currentUser.country || "",
+      languages: (currentUser.languages || []).join(", "),
+      genres: (currentUser.genres || []).join(", "),
+      website: currentUser.website || "",
+    });
+  }, [currentUser]);
+
+  const loadArtistUploads = useCallback(async () => {
+    if (!isSupabaseConfigured) {
+      setArtistUploads([]);
+      return;
+    }
+
+    try {
+      const songs = await listPublishedSongs();
+      setArtistUploads(songs.map(formatArtistSong));
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    loadArtistUploads();
+  }, [loadArtistUploads]);
 
   /* ── Mobile ── */
   useEffect(() => {
@@ -251,17 +415,59 @@ export default function Groovify() {
   const openAuth = (mode = "login") => {
     setAuthMode(mode);
     setAuthError("");
+    setAuthForm({ name:"", email:"", password:"", role:"listener" });
     setAuthOpen(true);
   };
 
-  const handleAuthSubmit = () => {
+  const handleAuthSubmit = async () => {
     const email = authForm.email.trim().toLowerCase();
     const password = authForm.password.trim();
     const name = authForm.name.trim();
+    const role = authForm.role || "listener";
 
     if (!email || !password || (authMode === "signup" && !name)) {
       setAuthError("Fill in all required fields.");
       return;
+    }
+
+    if (isSupabaseConfigured) {
+      setAuthLoading(true);
+      try {
+        if (authMode === "signup") {
+          const { data, error } = await signUpWithEmail({ email, password, name, role });
+          if (error) {
+            setAuthError("Unable to create your account right now.");
+            return;
+          }
+
+          setAuthOpen(false);
+          setAuthForm({ name:"", email:"", password:"", role:"listener" });
+
+          if (!data.session) {
+            showToast("Check your email to verify your account.", "info");
+            return;
+          }
+
+          showToast(`Welcome, ${name}!`, "info");
+          return;
+        }
+
+        const { error } = await signInWithEmail({ email, password });
+        if (error) {
+          setAuthError("Invalid email or password.");
+          return;
+        }
+
+        setAuthOpen(false);
+        setAuthForm({ name:"", email:"", password:"", role:"listener" });
+        showToast("Welcome back!", "info");
+        return;
+      } catch {
+        setAuthError("Unable to complete authentication right now.");
+        return;
+      } finally {
+        setAuthLoading(false);
+      }
     }
 
     try {
@@ -275,6 +481,7 @@ export default function Groovify() {
           name,
           email,
           password,
+          role,
           savedSongIds: [],
         };
         localStorage.setItem(STORAGE_KEYS.users, JSON.stringify([...users, newUser]));
@@ -282,7 +489,7 @@ export default function Groovify() {
         setCurrentUser(newUser);
         setLiked(new Set());
         setAuthOpen(false);
-        setAuthForm({ name:"", email:"", password:"" });
+        setAuthForm({ name:"", email:"", password:"", role:"listener" });
         showToast(`Welcome, ${name}!`, "info");
         return;
       }
@@ -296,21 +503,148 @@ export default function Groovify() {
       setCurrentUser(matchedUser);
       setLiked(new Set(matchedUser.savedSongIds || []));
       setAuthOpen(false);
-      setAuthForm({ name:"", email:"", password:"" });
+      setAuthForm({ name:"", email:"", password:"", role:"listener" });
       showToast(`Welcome back, ${matchedUser.name}!`, "info");
     } catch {
       setAuthError("Unable to access local account storage.");
     }
   };
 
-  const signOut = () => {
+  const signOut = async () => {
+    if (isSupabaseConfigured) {
+      try {
+        await signOutUser();
+      } catch {}
+    }
     setCurrentUser(null);
     setLiked(new Set());
     setAuthOpen(false);
     setAuthError("");
-    setAuthForm({ name:"", email:"", password:"" });
+    setAuthForm({ name:"", email:"", password:"", role:"listener" });
     try { localStorage.removeItem(STORAGE_KEYS.session); } catch {}
     showToast("Signed out.", "info");
+  };
+
+  const handleSaveProfile = async () => {
+    if (!currentUser || !isSupabaseConfigured) {
+      setProfileOpen(false);
+      return;
+    }
+
+    setProfileSaving(true);
+    try {
+      const languages = profileForm.languages.split(",").map((entry) => entry.trim()).filter(Boolean);
+      const genres = profileForm.genres.split(",").map((entry) => entry.trim()).filter(Boolean);
+      const updatedProfile = await upsertProfile({
+        id: currentUser.id,
+        email: currentUser.email,
+        full_name: currentUser.full_name || currentUser.name,
+        role: profileForm.role,
+        bio: profileForm.bio.trim(),
+        country: profileForm.country.trim(),
+        languages,
+        genres,
+        stage_name: profileForm.role === "artist" ? profileForm.stageName.trim() : "",
+        website: profileForm.website.trim(),
+        saved_song_ids: currentUser.savedSongIds || [],
+      });
+      setCurrentUser((prev) => prev ? {
+        ...prev,
+        role: updatedProfile.role,
+        bio: updatedProfile.bio || "",
+        country: updatedProfile.country || "",
+        languages: updatedProfile.languages || [],
+        genres: updatedProfile.genres || [],
+        stage_name: updatedProfile.stage_name || "",
+        website: updatedProfile.website || "",
+      } : prev);
+      setProfileOpen(false);
+      showToast("Profile updated.", "info");
+    } catch {
+      showToast("Unable to save your profile right now.", "warn");
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const openUploadFlow = () => {
+    if (!currentUser) {
+      openAuth("signup");
+      showToast("Create an account to upload songs.", "info");
+      return;
+    }
+    if (!currentUser.emailVerified) {
+      showToast("Verify your email before uploading songs.", "warn");
+      return;
+    }
+    if (currentUser.role !== "artist" || !artistProfileComplete) {
+      setProfileOpen(true);
+      return;
+    }
+    setUploadOpen(true);
+  };
+
+  const handleUploadSong = async () => {
+    if (!canUploadSongs || !currentUser) {
+      openUploadFlow();
+      return;
+    }
+
+    if (!uploadForm.title.trim() || !uploadForm.audioFile) {
+      showToast("Add a song title and audio file.", "warn");
+      return;
+    }
+
+    setUploadSaving(true);
+    try {
+      const coverUpload = uploadForm.coverFile
+        ? await uploadArtistAsset({
+            userId: currentUser.id,
+            file: uploadForm.coverFile,
+            bucket: "artist-covers",
+            pathPrefix: "covers",
+          })
+        : null;
+      const audioUpload = await uploadArtistAsset({
+        userId: currentUser.id,
+        file: uploadForm.audioFile,
+        bucket: "artist-audio",
+        pathPrefix: "audio",
+      });
+
+      const publishedSong = await publishArtistSong({
+        title: uploadForm.title.trim(),
+        artistName: currentUser.stage_name || currentUser.name,
+        album: uploadForm.album.trim(),
+        genre: uploadForm.genre.trim(),
+        language: uploadForm.language.trim(),
+        releaseYear: uploadForm.releaseYear ? Number(uploadForm.releaseYear) : null,
+        creditName: uploadForm.creditName.trim() || currentUser.name,
+        coverUrl: coverUpload?.publicUrl || "",
+        coverPath: coverUpload?.path || "",
+        audioPath: audioUpload.path,
+        profileId: currentUser.id,
+      });
+
+      const nextSong = formatArtistSong(publishedSong.song || publishedSong);
+      setArtistUploads((prev) => dedupe([nextSong, ...prev]));
+      setUploadOpen(false);
+      setUploadForm({
+        title: "",
+        album: "",
+        genre: "",
+        language: "",
+        releaseYear: "",
+        creditName: "",
+        coverFile: null,
+        audioFile: null,
+      });
+      showToast("Song uploaded.", "info");
+    } catch {
+      showToast("Unable to upload your song right now.", "warn");
+    } finally {
+      setUploadSaving(false);
+    }
   };
 
   const loadRazorpayScript = () => new Promise((resolve) => {
@@ -665,6 +999,11 @@ export default function Groovify() {
     setLoadingKey("artist");
     const requestId = ++artistReqRef.current;
     const query = buildDiscoveryTerm(`${name} songs`, contentFilter);
+    const uploadedMatches = artistUploads.filter((song) => {
+      const selectedArtist = normalizeArtistName(name).toLowerCase();
+      const songArtist = normalizeArtistName(song.artist).toLowerCase();
+      return songArtist === selectedArtist;
+    });
     const r = applyContentFilter(
       await runQuery(query, {
         fullOnly: contentFilter === "full",
@@ -674,11 +1013,12 @@ export default function Groovify() {
       contentFilter
     );
     if (requestId !== artistReqRef.current) return;
-    artistCacheRef.current.set(cacheKey, r);
-    setArtistSongs(r);
-    queueRef.current = r;
+    const merged = dedupe([...uploadedMatches, ...r]);
+    artistCacheRef.current.set(cacheKey, merged);
+    setArtistSongs(merged);
+    queueRef.current = merged;
     setLoadingKey(null);
-  }, [contentFilter, runQuery]);
+  }, [artistUploads, contentFilter, runQuery]);
 
   const withYear = (list) => applyYearFilter(applyContentFilter(list, contentFilter), yearId);
 
@@ -687,6 +1027,7 @@ export default function Groovify() {
     ...searchRes,
     ...browseList,
     ...artistSongs,
+    ...artistUploads,
   ]);
   const activeQueue = queueRef.current;
   const searchSongs = withYear(searchRes);
@@ -765,10 +1106,24 @@ export default function Groovify() {
               Save songs, keep your likes on this device, and build your own Groovify library.
             </div>
             {authMode === "signup" && (
-              <input value={authForm.name} onChange={(e) => setAuthForm((prev) => ({ ...prev, name:e.target.value }))}
-                placeholder="Your name"
-                style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
-                  borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+              <>
+                <input value={authForm.name} onChange={(e) => setAuthForm((prev) => ({ ...prev, name:e.target.value }))}
+                  placeholder="Your name"
+                  style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                    borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:10 }}>
+                  {["listener", "artist"].map((role) => (
+                    <button key={role} onClick={() => setAuthForm((prev) => ({ ...prev, role }))}
+                      style={{ padding:"10px 12px", borderRadius:14,
+                        border:`1px solid ${authForm.role === role ? "#6366F1" : t.inputB}`,
+                        background:authForm.role === role ? "rgba(99,102,241,.12)" : t.input,
+                        color:authForm.role === role ? "#6366F1" : t.textSub,
+                        fontSize:12.5, fontWeight:700 }}>
+                      {role === "artist" ? "Artist" : "Listener"}
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
             <input value={authForm.email} onChange={(e) => setAuthForm((prev) => ({ ...prev, email:e.target.value }))}
               placeholder="Email"
@@ -782,11 +1137,18 @@ export default function Groovify() {
               <div style={{ fontSize:12, color:"#F87171", marginBottom:12 }}>{authError}</div>
             )}
             <button onClick={handleAuthSubmit}
+              disabled={authLoading}
               style={{ width:"100%", padding:"12px 16px", borderRadius:14, border:"none",
                 background:"linear-gradient(135deg,#6366F1,#4F46E5)", color:"#fff",
-                fontSize:13.5, fontWeight:800, marginBottom:12 }}>
-              {authMode === "signup" ? "Sign Up" : "Login"}
+                fontSize:13.5, fontWeight:800, marginBottom:12, opacity:authLoading ? 0.65 : 1,
+                cursor:authLoading ? "not-allowed" : "pointer" }}>
+              {authLoading ? "Please wait..." : authMode === "signup" ? "Sign Up" : "Login"}
             </button>
+            {authMode === "signup" && isSupabaseConfigured && (
+              <div style={{ fontSize:11.5, color:t.textMuted, lineHeight:1.6, marginBottom:12 }}>
+                New accounts must verify their email before artist uploads are enabled.
+              </div>
+            )}
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:12 }}>
               <button onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(""); }}
                 style={{ background:"none", border:"none", color:"#6366F1", fontSize:12.5, fontWeight:700 }}>
@@ -799,6 +1161,117 @@ export default function Groovify() {
                 </button>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {profileOpen && (
+        <div style={{ position:"fixed", inset:0, zIndex:9997, background:"rgba(0,0,0,.6)",
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ width:"100%", maxWidth:520, borderRadius:24, padding:24,
+            background:dark ? "rgba(10,10,20,.98)" : "rgba(255,255,255,.98)",
+            border:`1px solid ${t.sideB}`, boxShadow:"0 28px 90px rgba(0,0,0,.35)" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+              <div>
+                <div style={{ fontSize:22, fontWeight:800, color:t.text }}>Complete your creator profile</div>
+                <div style={{ fontSize:12.5, color:t.textMuted, marginTop:4 }}>
+                  Choose your account type and complete the required artist details before uploading.
+                </div>
+              </div>
+              <button onClick={() => setProfileOpen(false)}
+                style={{ background:"none", border:"none", color:t.textMuted, fontSize:18 }}>✕</button>
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12 }}>
+              {["listener", "artist"].map((role) => (
+                <button key={role} onClick={() => setProfileForm((prev) => ({ ...prev, role }))}
+                  style={{ padding:"11px 14px", borderRadius:14,
+                    border:`1px solid ${profileForm.role === role ? "#6366F1" : t.inputB}`,
+                    background:profileForm.role === role ? "rgba(99,102,241,.12)" : t.input,
+                    color:profileForm.role === role ? "#6366F1" : t.textSub, fontSize:12.5, fontWeight:800 }}>
+                  {role === "artist" ? "Artist" : "Listener"}
+                </button>
+              ))}
+            </div>
+            {[
+              { key:"bio", placeholder:"Short bio" },
+              { key:"country", placeholder:"Country" },
+              { key:"languages", placeholder:"Languages (comma separated)" },
+              { key:"genres", placeholder:"Genres (comma separated)" },
+              { key:"website", placeholder:"Website or social link" },
+            ].map((field) => (
+              <input key={field.key} value={profileForm[field.key]} onChange={(e) => setProfileForm((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                placeholder={field.placeholder}
+                style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                  borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+            ))}
+            {profileForm.role === "artist" && (
+              <input value={profileForm.stageName} onChange={(e) => setProfileForm((prev) => ({ ...prev, stageName:e.target.value }))}
+                placeholder="Stage name"
+                style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                  borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+            )}
+            {!currentUser?.emailVerified && (
+              <div style={{ fontSize:11.5, color:"#F59E0B", marginBottom:12 }}>
+                Verify your email before artist uploads are enabled.
+              </div>
+            )}
+            <button onClick={handleSaveProfile} disabled={profileSaving}
+              style={{ width:"100%", padding:"12px 16px", borderRadius:14, border:"none",
+                background:"linear-gradient(135deg,#6366F1,#4F46E5)", color:"#fff",
+                fontSize:13.5, fontWeight:800, opacity:profileSaving ? 0.65 : 1,
+                cursor:profileSaving ? "not-allowed" : "pointer" }}>
+              {profileSaving ? "Saving..." : "Save Profile"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {uploadOpen && (
+        <div style={{ position:"fixed", inset:0, zIndex:9996, background:"rgba(0,0,0,.6)",
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ width:"100%", maxWidth:560, borderRadius:24, padding:24,
+            background:dark ? "rgba(10,10,20,.98)" : "rgba(255,255,255,.98)",
+            border:`1px solid ${t.sideB}`, boxShadow:"0 28px 90px rgba(0,0,0,.35)" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+              <div>
+                <div style={{ fontSize:22, fontWeight:800, color:t.text }}>Upload a song</div>
+                <div style={{ fontSize:12.5, color:t.textMuted, marginTop:4 }}>
+                  Published tracks appear in Groovify with your artist profile.
+                </div>
+              </div>
+              <button onClick={() => setUploadOpen(false)}
+                style={{ background:"none", border:"none", color:t.textMuted, fontSize:18 }}>✕</button>
+            </div>
+            {[
+              ["title", "Song title"],
+              ["album", "Album or release name"],
+              ["genre", "Genre"],
+              ["language", "Language"],
+              ["releaseYear", "Release year"],
+              ["creditName", "Credit name"],
+            ].map(([key, placeholder]) => (
+              <input key={key} value={uploadForm[key]} onChange={(e) => setUploadForm((prev) => ({ ...prev, [key]: e.target.value }))}
+                placeholder={placeholder}
+                style={{ width:"100%", marginBottom:10, background:t.input, border:`1px solid ${t.inputB}`,
+                  borderRadius:14, padding:"12px 14px", color:t.text, fontSize:13.5, outline:"none" }} />
+            ))}
+            <div style={{ display:"grid", gridTemplateColumns: mobile ? "1fr" : "1fr 1fr", gap:10, marginBottom:14 }}>
+              <label style={{ padding:"12px 14px", borderRadius:14, border:`1px solid ${t.inputB}`, background:t.input, color:t.textSub, fontSize:12.5 }}>
+                Cover image
+                <input type="file" accept="image/*" onChange={(e) => setUploadForm((prev) => ({ ...prev, coverFile: e.target.files?.[0] || null }))} style={{ display:"block", marginTop:8 }} />
+              </label>
+              <label style={{ padding:"12px 14px", borderRadius:14, border:`1px solid ${t.inputB}`, background:t.input, color:t.textSub, fontSize:12.5 }}>
+                Audio file
+                <input type="file" accept="audio/*" onChange={(e) => setUploadForm((prev) => ({ ...prev, audioFile: e.target.files?.[0] || null }))} style={{ display:"block", marginTop:8 }} />
+              </label>
+            </div>
+            <button onClick={handleUploadSong} disabled={uploadSaving}
+              style={{ width:"100%", padding:"12px 16px", borderRadius:14, border:"none",
+                background:"linear-gradient(135deg,#10B981,#059669)", color:"#fff",
+                fontSize:13.5, fontWeight:800, opacity:uploadSaving ? 0.65 : 1,
+                cursor:uploadSaving ? "not-allowed" : "pointer" }}>
+              {uploadSaving ? "Uploading..." : "Upload Song"}
+            </button>
           </div>
         </div>
       )}
@@ -1060,6 +1533,14 @@ export default function Groovify() {
                     Login / Sign Up
                   </button>
                 )}
+                {isSupabaseConfigured && (
+                  <button onClick={openUploadFlow}
+                    style={{ padding:"8px 12px", borderRadius:20,
+                      border:`1px solid ${t.sideB}`, background:t.hover,
+                      color:t.textSub, fontSize:12, fontWeight:600 }}>
+                    Upload
+                  </button>
+                )}
                 <button onClick={() => setSupportOpen(true)}
                   style={{ padding:"8px 12px", borderRadius:20,
                     border:"none", background:"linear-gradient(135deg,#F97316,#EA580C)",
@@ -1081,7 +1562,7 @@ export default function Groovify() {
                       background:showPanel ? "rgba(99,102,241,.12)" : t.hover,
                       color:showPanel ? "#6366F1" : t.textSub,
                       fontSize:12, fontWeight:600 }}>
-                    {showPanel ? "◀ Close" : "Now Playing ▶"}
+                    {showPanel ? "Close Player" : "Now Playing"}
                   </button>
                 )}
               </div>
@@ -1207,6 +1688,28 @@ export default function Groovify() {
                     </div>
                   ))
                 )}
+                {artistUploads.length > 0 && (
+                  <div style={{ marginBottom:38 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
+                      <h2 style={{ fontSize:18, fontWeight:700, color:t.text, letterSpacing:"-0.2px" }}>
+                        Independent Artists
+                      </h2>
+                      <span style={{ fontSize:11, color:t.textMuted, fontWeight:500 }}>
+                        {artistUploads.length} songs
+                      </span>
+                    </div>
+                    <div style={{ display:"flex", gap:14, overflowX:"auto", paddingBottom:8 }}>
+                      {artistUploads.map((s) => (
+                        <SongCard key={s.id} song={s} size={155} t={t}
+                          isCurrent={current?.id === s.id}
+                          isPlaying={current?.id === s.id && playing}
+                          liked={liked.has(s.id)}
+                          onPlay={() => playSong(s, artistUploads)}
+                          onLike={() => toggleLike(s.id)} />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1296,12 +1799,10 @@ export default function Groovify() {
                   Click any artist to load their full discography
                 </p>
                 <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  {["Arijit Singh","Shreya Ghoshal","AR Rahman","Devi Sri Prasad","Anirudh Ravichander",
-                    "Humane Sagar","Neha Kakkar","Diljit Dosanjh","Sid Sriram","Badshah",
-                    "Hardy Sandhu","Asha Bhosle","Kishore Kumar","Lata Mangeshkar","SP Balasubrahmanyam",
-                    "Anurag Kulkarni","Udit Narayan","Kumar Sanu","Alka Yagnik","Sunidhi Chauhan",
-                    "Sonu Nigam","Shankar Mahadevan","Hariharan","KK","Mohit Chauhan",
-                    "Aseema Panda","Kuldeep Pattnaik","Antara Nandy","Odia Humane Sagar"].map(a => (
+                  {Array.from(new Set([
+                    ...FEATURED_ARTISTS,
+                    ...artistUploads.map((song) => song.artist),
+                  ])).map(a => (
                     <button key={a} onClick={() => loadArtist(a)}
                       style={{ padding:"8px 16px", borderRadius:22,
                         border:`1px solid ${t.sideB}`, background:t.hover,

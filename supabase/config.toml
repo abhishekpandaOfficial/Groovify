@@ -1,0 +1,7 @@
+project_id = "trhacefubuncdrabfede"
+
+[functions.publish-song]
+verify_jwt = true
+
+[functions.song-stream]
+verify_jwt = false
