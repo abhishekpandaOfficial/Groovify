@@ -60,6 +60,11 @@ const STORAGE_KEYS = {
   users: "groovify_users_v1",
 };
 
+const SUPPORT_AMOUNTS = [
+  { id: "inr_50", label: "INR 50", amount: 5000, currency: "INR", display: "Rs50" },
+  { id: "usd_5", label: "USD 5", amount: 500, currency: "USD", display: "$5" },
+];
+
 // ═══════════════════════════════ MAIN ════════════════════════════
 export default function Groovify() {
   const [dark, setDark]         = useState(() => {
@@ -85,6 +90,9 @@ export default function Groovify() {
   const [authForm,    setAuthForm]    = useState({ name:"", email:"", password:"" });
   const [authError,   setAuthError]   = useState("");
   const [currentUser, setCurrentUser] = useState(null);
+  const [supportOpen, setSupportOpen] = useState(false);
+  const [supportLoading, setSupportLoading] = useState(false);
+  const [supportOption, setSupportOption] = useState(SUPPORT_AMOUNTS[0]);
   const [current,     setCurrent]     = useState(null);
   const [playing,     setPlaying]     = useState(false);
   const [progress,    setProgress]    = useState(0);
@@ -278,6 +286,94 @@ export default function Groovify() {
     setAuthForm({ name:"", email:"", password:"" });
     try { localStorage.removeItem(STORAGE_KEYS.session); } catch {}
     showToast("Signed out.", "info");
+  };
+
+  const loadRazorpayScript = () => new Promise((resolve) => {
+    if (window.Razorpay) {
+      resolve(true);
+      return;
+    }
+    const existing = document.querySelector('script[data-groovify-razorpay="true"]');
+    if (existing) {
+      existing.addEventListener("load", () => resolve(true), { once: true });
+      existing.addEventListener("error", () => resolve(false), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+    script.dataset.groovifyRazorpay = "true";
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+
+  const handleRazorpaySupport = async () => {
+    const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID;
+    if (!razorpayKey) {
+      showToast("Missing Razorpay public key.", "warn");
+      return;
+    }
+
+    setSupportLoading(true);
+    const scriptLoaded = await loadRazorpayScript();
+    if (!scriptLoaded) {
+      setSupportLoading(false);
+      showToast("Razorpay checkout failed to load.", "warn");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/razorpay-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: supportOption.amount,
+          currency: supportOption.currency,
+          note: "Support Groovify",
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error || "Unable to create Razorpay order.");
+
+      const razorpay = new window.Razorpay({
+        key: razorpayKey,
+        amount: payload.amount,
+        currency: payload.currency,
+        name: "Groovify",
+        description: "Keep Groovify open and free",
+        order_id: payload.id,
+        image: "/groovify-icon.svg",
+        theme: { color: "#6366F1" },
+        notes: {
+          product: "Groovify Support",
+          selected_amount: supportOption.display,
+        },
+        prefill: currentUser ? {
+          name: currentUser.name,
+          email: currentUser.email,
+        } : {},
+        handler: () => {
+          setSupportOpen(false);
+          showToast("Thank you for supporting Groovify.", "info");
+        },
+      });
+      razorpay.open();
+    } catch (error) {
+      showToast(error.message || "Unable to start payment.", "warn");
+    } finally {
+      setSupportLoading(false);
+    }
+  };
+
+  const handlePatreonSupport = () => {
+    const patreonUrl = import.meta.env.VITE_PATREON_URL;
+    if (!patreonUrl) {
+      showToast("Set VITE_PATREON_URL for the Patreon button.", "warn");
+      return;
+    }
+    window.open(patreonUrl, "_blank", "noopener,noreferrer");
   };
 
   const toggleLike = (id) => {
@@ -664,6 +760,55 @@ export default function Groovify() {
         </div>
       )}
 
+      {supportOpen && (
+        <div style={{ position:"fixed", inset:0, zIndex:9997, background:"rgba(0,0,0,.6)",
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div style={{ width:"100%", maxWidth:460, borderRadius:24, padding:24,
+            background:dark ? "rgba(10,10,20,.98)" : "rgba(255,255,255,.98)",
+            border:`1px solid ${t.sideB}`, boxShadow:"0 28px 90px rgba(0,0,0,.35)" }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
+              <Brand t={t} size={30} compact />
+              <button onClick={() => setSupportOpen(false)}
+                style={{ background:"none", border:"none", color:t.textMuted, fontSize:18 }}>✕</button>
+            </div>
+            <div style={{ fontSize:22, fontWeight:800, color:t.text, marginBottom:8 }}>
+              Keep Groovify open and free
+            </div>
+            <div style={{ fontSize:13, color:t.textSub, lineHeight:1.7, marginBottom:18 }}>
+              Support hosting, API calls, and future features. Choose a starter amount and donate with Razorpay or Patreon.
+            </div>
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:18 }}>
+              {SUPPORT_AMOUNTS.map((option) => (
+                <button key={option.id} onClick={() => setSupportOption(option)}
+                  style={{ padding:"10px 14px", borderRadius:18,
+                    border:`1px solid ${supportOption.id === option.id ? "#6366F1" : t.sideB}`,
+                    background:supportOption.id === option.id ? "rgba(99,102,241,.15)" : t.hover,
+                    color:supportOption.id === option.id ? "#6366F1" : t.textSub,
+                    fontSize:13, fontWeight:700 }}>
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns: mobile ? "1fr" : "1fr 1fr", gap:10, marginBottom:14 }}>
+              <button onClick={handleRazorpaySupport} disabled={supportLoading}
+                style={{ padding:"13px 16px", borderRadius:16, border:"none",
+                  background:"linear-gradient(135deg,#0F172A,#1D4ED8)", color:"#fff",
+                  fontSize:13.5, fontWeight:800, opacity:supportLoading ? 0.7 : 1 }}>
+                {supportLoading ? "Opening Razorpay..." : `Pay with Razorpay (${supportOption.display})`}
+              </button>
+              <button onClick={handlePatreonSupport}
+                style={{ padding:"13px 16px", borderRadius:16, border:`1px solid ${t.sideB}`,
+                  background:t.hover, color:t.text, fontSize:13.5, fontWeight:800 }}>
+                Support on Patreon
+              </button>
+            </div>
+            <div style={{ fontSize:11.5, color:t.textMuted, lineHeight:1.6 }}>
+              Razorpay requires `VITE_RAZORPAY_KEY_ID`, `RAZORPAY_KEY_ID`, and `RAZORPAY_KEY_SECRET`. Patreon uses `VITE_PATREON_URL`.
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
 
         {/* ══════════════ SIDEBAR ══════════════ */}
@@ -775,6 +920,12 @@ export default function Groovify() {
                   </div>
                 )}
               </div>
+              <button onClick={() => setSupportOpen(true)}
+                style={{ width:"100%", padding:"10px", borderRadius:10, border:"none",
+                  background:"linear-gradient(135deg,#F97316,#EA580C)", color:"#fff",
+                  fontSize:12.5, fontWeight:800, marginBottom:10 }}>
+                Support Groovify
+              </button>
               <button onClick={() => loadCatalog(true)} disabled={refreshing}
                 style={{ width:"100%", padding:"9px", borderRadius:10,
                   border:`1px solid ${t.sideB}`, background:t.hover,
@@ -858,6 +1009,12 @@ export default function Groovify() {
                     Login / Sign Up
                   </button>
                 )}
+                <button onClick={() => setSupportOpen(true)}
+                  style={{ padding:"8px 12px", borderRadius:20,
+                    border:"none", background:"linear-gradient(135deg,#F97316,#EA580C)",
+                    color:"#fff", fontSize:12, fontWeight:700 }}>
+                  Support
+                </button>
                 <button onClick={() => setDark(d => !d)}
                   style={{ width:38, height:38, borderRadius:"50%",
                     border:`1px solid ${t.sideB}`, background:t.hover,
