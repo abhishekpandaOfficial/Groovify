@@ -13,6 +13,16 @@ const searchLocalMusicApi = async (term, { iTunesLimit = 18, audiusLimit = 8, fu
   return payload.songs || [];
 };
 
+const fetchArtistInfo = async (artistName) => {
+  const params = new URLSearchParams({ artist: artistName });
+  const response = await fetch(`/api/artist-info?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(`Artist info failed with ${response.status}`);
+  }
+  const payload = await response.json();
+  return payload.artist || null;
+};
+
 // API utility functions
 const fetchItunes = async (term, limit = 20) => {
   try {
@@ -90,4 +100,4 @@ const refreshSongStream = async (song) => {
   };
 };
 
-export { fetchItunes, fetchAudius, fetchBoth, dedupe, findPreviewFallback, refreshSongStream };
+export { fetchArtistInfo, fetchItunes, fetchAudius, fetchBoth, dedupe, findPreviewFallback, refreshSongStream };

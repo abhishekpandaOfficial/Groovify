@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { handleMusicSearchRequest } from "./api/_music.js";
+import { handleArtistInfoRequest, handleMusicSearchRequest } from "./api/_music.js";
 
 export default defineConfig({
   plugins: [
@@ -10,7 +10,11 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use(async (req, res, next) => {
           if (!req.url?.startsWith("/api/music-search")) {
-            next();
+            if (!req.url?.startsWith("/api/artist-info")) {
+              next();
+              return;
+            }
+            await handleArtistInfoRequest(req, res);
             return;
           }
           await handleMusicSearchRequest(req, res);

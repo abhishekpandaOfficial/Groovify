@@ -2,6 +2,7 @@ const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const searchCache = new Map();
 const pendingSearches = new Map();
+const artistInfoCache = new Map();
 
 const jsonHeaders = {
   Accept: "application/json, text/javascript, */*; q=0.01",
@@ -23,6 +24,20 @@ const getCached = (key) => {
 
 const setCached = (key, value) => {
   searchCache.set(key, { ts: Date.now(), value });
+};
+
+const getArtistInfoCached = (key) => {
+  const cached = artistInfoCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.ts > SEARCH_CACHE_TTL_MS) {
+    artistInfoCache.delete(key);
+    return null;
+  }
+  return cached.value;
+};
+
+const setArtistInfoCached = (key, value) => {
+  artistInfoCache.set(key, { ts: Date.now(), value });
 };
 
 const clampLimit = (value, fallback) => {
@@ -161,6 +176,39 @@ const writeJson = (res, status, payload) => {
   res.end(JSON.stringify(payload));
 };
 
+const fetchArtistInfo = async (artistName) => {
+  const normalizedName = artistName.trim();
+  if (!normalizedName) return null;
+
+  const cacheKey = normalizedName.toLowerCase();
+  const cached = getArtistInfoCached(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(normalizedName)}`;
+    const summary = await fetchJson(summaryUrl);
+    const artistInfo = {
+      name: summary.title || normalizedName,
+      description: summary.description || "",
+      extract: summary.extract || "",
+      image: summary.originalimage?.source || summary.thumbnail?.source || "",
+      pageUrl: summary.content_urls?.desktop?.page || "",
+    };
+    setArtistInfoCached(cacheKey, artistInfo);
+    return artistInfo;
+  } catch {
+    const fallback = {
+      name: normalizedName,
+      description: "",
+      extract: "",
+      image: "",
+      pageUrl: "",
+    };
+    setArtistInfoCached(cacheKey, fallback);
+    return fallback;
+  }
+};
+
 const handleMusicSearchRequest = async (req, res) => {
   if (req.method !== "GET") {
     writeJson(res, 405, { error: "Method not allowed" });
@@ -181,4 +229,25 @@ const handleMusicSearchRequest = async (req, res) => {
   }
 };
 
-export { handleMusicSearchRequest, searchMusic };
+const handleArtistInfoRequest = async (req, res) => {
+  if (req.method !== "GET") {
+    writeJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  try {
+    const url = new URL(req.url || "/api/artist-info", "http://localhost");
+    const artist = url.searchParams.get("artist") || "";
+    if (!artist.trim()) {
+      writeJson(res, 400, { error: "Missing artist name" });
+      return;
+    }
+
+    const info = await fetchArtistInfo(artist);
+    writeJson(res, 200, { artist: info });
+  } catch {
+    writeJson(res, 500, { error: "Artist info is temporarily unavailable." });
+  }
+};
+
+export { fetchArtistInfo, handleArtistInfoRequest, handleMusicSearchRequest, searchMusic };

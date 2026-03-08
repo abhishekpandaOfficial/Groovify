@@ -6,7 +6,7 @@ import Skel from "./components/Skel";
 import Brand from "./components/Brand";
 import SongCard from "./components/SongCard";
 import SongRow from "./components/SongRow";
-import { dedupe, fetchBoth, findPreviewFallback, refreshSongStream } from "./utils/api";
+import { dedupe, fetchArtistInfo, fetchBoth, findPreviewFallback, refreshSongStream } from "./utils/api";
 import { FEATURED_ARTISTS, formatArtistSong, normalizeArtistName } from "./utils/artistProfiles";
 import {
   fetchProfile,
@@ -109,6 +109,8 @@ export default function Groovify() {
   const [browseList,  setBrowseList]  = useState([]);
   const [artistSongs, setArtistSongs] = useState([]);
   const [artistView,  setArtistView]  = useState(null);
+  const [artistInfo,  setArtistInfo]  = useState(null);
+  const [artistInfoTick, setArtistInfoTick] = useState(0);
   const [loadingHome, setLoadingHome] = useState(true);
   const [loadingKey,  setLoadingKey]  = useState(null);
   const [searchQ,     setSearchQ]     = useState("");
@@ -181,6 +183,7 @@ export default function Groovify() {
   const browseCacheRef = useRef(new Map());
   const searchCacheRef = useRef(new Map());
   const artistCacheRef = useRef(new Map());
+  const artistInfoCacheRef = useRef(new Map());
   const searchReqRef = useRef(0);
   const artistReqRef = useRef(0);
   const supportAmount = Number(supportAmountInput);
@@ -322,6 +325,42 @@ export default function Groovify() {
       const songs = await listPublishedSongs();
       setArtistUploads(songs.map(formatArtistSong));
     } catch {}
+  }, []);
+
+  const hydrateArtistInfo = useCallback(async (name) => {
+    const cacheKey = normalizeArtistName(name).toLowerCase();
+    if (artistInfoCacheRef.current.has(cacheKey)) {
+      const cached = artistInfoCacheRef.current.get(cacheKey);
+      setArtistInfo(cached);
+      return cached;
+    }
+
+    try {
+      const info = await fetchArtistInfo(name);
+      const nextInfo = info || {
+        name: normalizeArtistName(name),
+        description: "",
+        extract: "",
+        image: "",
+        pageUrl: "",
+      };
+      artistInfoCacheRef.current.set(cacheKey, nextInfo);
+      setArtistInfoTick((value) => value + 1);
+      setArtistInfo(nextInfo);
+      return nextInfo;
+    } catch {
+      const fallbackInfo = {
+        name: normalizeArtistName(name),
+        description: "",
+        extract: "",
+        image: "",
+        pageUrl: "",
+      };
+      artistInfoCacheRef.current.set(cacheKey, fallbackInfo);
+      setArtistInfoTick((value) => value + 1);
+      setArtistInfo(fallbackInfo);
+      return fallbackInfo;
+    }
   }, []);
 
   useEffect(() => {
@@ -994,6 +1033,7 @@ export default function Groovify() {
   const loadArtist = useCallback(async (name) => {
     setArtistView(name);
     setView("artist");
+    hydrateArtistInfo(name);
     const cacheKey = `${name.toLowerCase()}::${contentFilter}`;
     if (artistCacheRef.current.has(cacheKey)) {
       const cached = artistCacheRef.current.get(cacheKey);
@@ -1030,7 +1070,7 @@ export default function Groovify() {
     setArtistSongs(merged);
     queueRef.current = merged;
     setLoadingKey(null);
-  }, [artistUploads, baseSongs, contentFilter, runQuery]);
+  }, [artistUploads, baseSongs, contentFilter, hydrateArtistInfo, runQuery]);
 
   const withYear = (list) => applyYearFilter(applyContentFilter(list, contentFilter), yearId);
 
@@ -1068,13 +1108,26 @@ export default function Groovify() {
         }];
       })
   ).values()).sort((a, b) => a.name.localeCompare(b.name));
+  void artistInfoTick;
   const allArtists = Array.from(new Map([
     ...FEATURED_ARTISTS.map((name) => {
       const normalizedName = normalizeArtistName(name);
       const existing = artistsIndex.find((artist) => artist.name.toLowerCase() === normalizedName.toLowerCase());
-      return [normalizedName.toLowerCase(), existing || { name: normalizedName, art: "", songs: [] }];
+      const wikiInfo = artistInfoCacheRef.current.get(normalizedName.toLowerCase());
+      return [normalizedName.toLowerCase(), existing || {
+        name: normalizedName,
+        art: wikiInfo?.image || "",
+        songs: [],
+      }];
     }),
-    ...artistsIndex.map((artist) => [artist.name.toLowerCase(), artist]),
+    ...artistsIndex.map((artist) => {
+      const wikiInfo = artistInfoCacheRef.current.get(artist.name.toLowerCase());
+      return [artist.name.toLowerCase(), {
+        ...artist,
+        art: wikiInfo?.image || artist.art,
+        description: wikiInfo?.description || "",
+      }];
+    }),
   ]).values());
   const currentArtistMeta = allArtists.find((artist) =>
     artistView && artist.name.toLowerCase() === normalizeArtistName(artistView).toLowerCase()
@@ -1085,6 +1138,23 @@ export default function Groovify() {
   useEffect(() => {
     if (view === "artist" && artistView) loadArtist(artistView);
   }, [contentFilter]); // eslint-disable-line
+
+  useEffect(() => {
+    if (view !== "artists") return;
+    allArtists.slice(0, 24).forEach((artist) => {
+      const cacheKey = artist.name.toLowerCase();
+      if (!artistInfoCacheRef.current.has(cacheKey)) {
+        fetchArtistInfo(artist.name)
+          .then((info) => {
+            if (info) {
+              artistInfoCacheRef.current.set(cacheKey, info);
+              setArtistInfoTick((value) => value + 1);
+            }
+          })
+          .catch(() => {});
+      }
+    });
+  }, [allArtists, view]);
 
   /* ─────────────────────── RENDER ─────────────────────────── */
   return (
@@ -1846,6 +1916,12 @@ export default function Groovify() {
                           overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                           {artist.name}
                         </div>
+                        {artist.description && (
+                          <div style={{ fontSize:11.5, color:t.textSub, lineHeight:1.45, marginBottom:6,
+                            display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }}>
+                            {artist.description}
+                          </div>
+                        )}
                         <div style={{ fontSize:11.5, color:t.textMuted }}>
                           {artist.songs.length} songs
                         </div>
@@ -1883,6 +1959,23 @@ export default function Groovify() {
                     <div style={{ fontSize:13, color:t.textMuted, marginTop:4 }}>
                       {(artistList.length || currentArtistMeta?.songs.length || 0)} tracks
                     </div>
+                    {(artistInfo?.description || artistInfo?.extract) && (
+                      <div style={{ maxWidth:720, fontSize:12.5, color:t.textSub, lineHeight:1.7, marginTop:10 }}>
+                        {artistInfo?.description && (
+                          <div style={{ fontWeight:700, color:"#6366F1", marginBottom:4 }}>
+                            {artistInfo.description}
+                          </div>
+                        )}
+                        {artistInfo?.extract}
+                      </div>
+                    )}
+                    {artistInfo?.pageUrl && (
+                      <a href={artistInfo.pageUrl} target="_blank" rel="noreferrer"
+                        style={{ display:"inline-block", marginTop:10, fontSize:12.5, color:"#6366F1",
+                          textDecoration:"none", fontWeight:700 }}>
+                        View artist details
+                      </a>
+                    )}
                   </div>
                 </div>
                 {loadingKey === "artist" ? (
