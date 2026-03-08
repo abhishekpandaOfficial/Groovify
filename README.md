@@ -39,3 +39,9 @@ VITE_PATREON_URL=https://www.patreon.com/your_creator_page
 - `VITE_RAZORPAY_KEY_ID` is used by the frontend checkout button.
 - `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` are used by `/api/razorpay-order`.
 - `VITE_PATREON_URL` controls the Patreon support button target.
+
+## Deploy
+
+- Vercel uses [vercel.json](/Users/abhishekpanda/Documents/Code/groovify/vercel.json) so all non-API URLs rewrite to the SPA entry and direct loads keep working.
+- If a static fallback is ever hit, Groovify serves [404.html](/Users/abhishekpanda/Documents/Code/groovify/public/404.html).
+- Supabase deploy is only needed when you change files inside `supabase/`. If you already ran `db push` and deployed `publish-song` and `song-stream`, there is nothing else pending there.
