@@ -1,0 +1,1249 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { CATALOG, CONTENT_FILTERS, INDUSTRIES, YEARS } from "./config/constants";
+import { DARK, LIGHT } from "./config/themes";
+import Img from "./components/Img";
+import Skel from "./components/Skel";
+import SongCard from "./components/SongCard";
+import SongRow from "./components/SongRow";
+import { dedupe, fetchBoth, findPreviewFallback, refreshSongStream } from "./utils/api";
+
+const fmtTime = (s) => {
+  if (!s || Number.isNaN(s)) return "0:00";
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+};
+
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+const matchesToken = (song, token) => {
+  const haystack = [
+    song.title,
+    song.artist,
+    song.album,
+    song.genre,
+    song.source,
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  return haystack.includes(token);
+};
+
+const applyYearFilter = (list, yearId) => {
+  const yr = YEARS.find((y) => y.id === yearId);
+  if (!yr) return list;
+  return list.filter((song) => song.year && song.year >= yr.from && song.year <= yr.to);
+};
+
+const applyContentFilter = (list, contentFilter) => {
+  if (contentFilter === "full") return list.filter((song) => !song.isPreview);
+  if (contentFilter === "remix") return list.filter((song) => matchesToken(song, "remix"));
+  if (contentFilter === "mashup") return list.filter((song) => matchesToken(song, "mashup"));
+  return list;
+};
+
+const buildDiscoveryTerm = (term, contentFilter) => {
+  if (contentFilter === "remix") return `${term} remix`;
+  if (contentFilter === "mashup") return `${term} mashup`;
+  return term;
+};
+
+// ═══════════════════════════════ MAIN ════════════════════════════
+export default function Groovify() {
+  const [dark, setDark]         = useState(() => {
+    try { return localStorage.getItem("groovify_theme") !== "light"; } catch { return true; }
+  });
+  const t = dark ? DARK : LIGHT;
+
+  const [view,        setView]        = useState("home");
+  const [catalog,     setCatalog]     = useState({});
+  const [searchRes,   setSearchRes]   = useState([]);
+  const [browseList,  setBrowseList]  = useState([]);
+  const [artistSongs, setArtistSongs] = useState([]);
+  const [artistView,  setArtistView]  = useState(null);
+  const [loadingHome, setLoadingHome] = useState(true);
+  const [loadingKey,  setLoadingKey]  = useState(null);
+  const [searchQ,     setSearchQ]     = useState("");
+  const [industry,    setIndustry]    = useState("all");
+  const [yearId,      setYearId]      = useState(null);
+  const [contentFilter, setContentFilter] = useState("full");
+  const [liked,       setLiked]       = useState(new Set());
+  const [current,     setCurrent]     = useState(null);
+  const [playing,     setPlaying]     = useState(false);
+  const [progress,    setProgress]    = useState(0);
+  const [curTime,     setCurTime]     = useState(0);
+  const [totalDur,    setTotalDur]    = useState(30);
+  const [vol,         setVol]         = useState(0.85);
+  const [muted,       setMuted]       = useState(false);
+  const [shuffle,     setShuffle]     = useState(false);
+  const [repeat,      setRepeat]      = useState(false);
+  const [showPanel,   setShowPanel]   = useState(false);
+  const [sideOpen,    setSideOpen]    = useState(true);
+  const [mobile,      setMobile]      = useState(false);
+  const [toast,       setToast]       = useState({ msg:"", type:"info" });
+  const [lastFetch,   setLastFetch]   = useState(null);
+  const [refreshing,  setRefreshing]  = useState(false);
+  const [recentlyPlayed, setRecentlyPlayed] = useState([]);
+
+  const audioRef   = useRef(null);
+  const currentRef = useRef(null);
+  const queueRef   = useRef([]);
+  const idxRef     = useRef(-1);
+  const advanceQueueRef = useRef(null);
+  const shuffleRef = useRef(false);
+  const repeatRef  = useRef(false);
+  const searchTmr  = useRef(null);
+  const retryRef   = useRef(new Set());
+  const sectionCacheRef = useRef(new Map());
+  const browseCacheRef = useRef(new Map());
+  const searchCacheRef = useRef(new Map());
+  const artistCacheRef = useRef(new Map());
+  const searchReqRef = useRef(0);
+  const artistReqRef = useRef(0);
+
+  useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
+  useEffect(() => { repeatRef.current  = repeat;  }, [repeat]);
+  useEffect(() => { currentRef.current = current; }, [current]);
+  useEffect(() => {
+    try { localStorage.setItem("groovify_theme", dark ? "dark" : "light"); } catch {}
+  }, [dark]);
+
+  /* ── Mobile ── */
+  useEffect(() => {
+    const chk = () => { const m = window.innerWidth < 768; setMobile(m); if (m) setSideOpen(false); };
+    chk(); window.addEventListener("resize", chk);
+    return () => window.removeEventListener("resize", chk);
+  }, []);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = muted ? 0 : vol;
+  }, [vol, muted]);
+
+  /* ── Toast ── */
+  const showToast = (msg, type = "info") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast({ msg:"", type:"info" }), 2600);
+  };
+
+  /* ── Queue navigation ── */
+  const advanceQueue = (dir = 1) => {
+    const q = queueRef.current; if (!q.length) return;
+    const ni = shuffleRef.current
+      ? Math.floor(Math.random() * q.length)
+      : ((idxRef.current + dir + q.length) % q.length);
+    loadAndPlay(q[ni], ni);
+  };
+
+  useEffect(() => {
+    advanceQueueRef.current = advanceQueue;
+  });
+
+  const loadAndPlay = (song, qi) => {
+    const a = audioRef.current; if (!a || !song?.audio) return;
+    retryRef.current.delete(song.id);
+    a.src = song.audio; a.load();
+    a.play()
+      .then(() => {
+        setCurrent(song);
+        idxRef.current = qi;
+        setRecentlyPlayed((prev) => {
+          const next = [song, ...prev.filter((entry) => entry.id !== song.id)];
+          return next.slice(0, 30);
+        });
+      })
+      .catch(() => { setCurrent(song); idxRef.current = qi; showToast("Tap ▶ to resume", "info"); });
+  };
+
+  const playSong = useCallback((song, list) => {
+    if (!song?.audio) { showToast("No audio for this track", "warn"); return; }
+    const q = list && list.length ? list : queueRef.current;
+    const qi = q.findIndex(s => s.id === song.id);
+    queueRef.current = q;
+    if (current?.id === song.id) {
+      const a = audioRef.current;
+      a.paused ? a.play().catch(() => {}) : a.pause();
+    } else {
+      loadAndPlay(song, qi >= 0 ? qi : 0);
+    }
+  }, [current]); // eslint-disable-line
+
+  const seek = e => {
+    const a = audioRef.current; if (!a) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    a.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (a.duration || 30);
+  };
+
+  const toggleLike = id => setLiked(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const runQuery = useCallback(async (term, {
+    fallbackToMixed = false,
+    fullOnly = false,
+    iTunesLimit = 8,
+    audiusLimit = 20,
+  } = {}) => {
+    const results = await fetchBoth(term, iTunesLimit, audiusLimit, { fullOnly });
+    if (results.length || !fullOnly || !fallbackToMixed) return results;
+    return fetchBoth(term, iTunesLimit, audiusLimit, { fullOnly: false });
+  }, []);
+
+  const replaceSongEverywhere = useCallback((nextSong) => {
+    setCatalog((prev) => {
+      const next = {};
+      for (const [key, songs] of Object.entries(prev)) {
+        next[key] = songs.map((song) => song.id === nextSong.id ? nextSong : song);
+      }
+      return next;
+    });
+    setSearchRes((prev) => prev.map((song) => song.id === nextSong.id ? nextSong : song));
+    setBrowseList((prev) => prev.map((song) => song.id === nextSong.id ? nextSong : song));
+    setArtistSongs((prev) => prev.map((song) => song.id === nextSong.id ? nextSong : song));
+    queueRef.current = queueRef.current.map((song) => song.id === nextSong.id ? nextSong : song);
+    setCurrent((prev) => prev?.id === nextSong.id ? nextSong : prev);
+  }, []);
+
+  /* ── Audio engine ── */
+  useEffect(() => {
+    const a = new Audio();
+    a.volume = 0.85;
+    a.addEventListener("timeupdate", () => {
+      setCurTime(a.currentTime);
+      if (a.duration) setProgress(a.currentTime / a.duration);
+    });
+    a.addEventListener("loadedmetadata", () => setTotalDur(a.duration || 30));
+    a.addEventListener("play",  () => setPlaying(true));
+    a.addEventListener("pause", () => setPlaying(false));
+    a.addEventListener("ended", () => {
+      if (repeatRef.current) { a.currentTime = 0; a.play().catch(() => {}); return; }
+      advanceQueueRef.current?.(1);
+    });
+    a.addEventListener("error", async () => {
+      const song = currentRef.current || queueRef.current[idxRef.current];
+      if (song?.audiusTrackId && !retryRef.current.has(song.id)) {
+        retryRef.current.add(song.id);
+        try {
+          const refreshedSong = await refreshSongStream(song);
+          replaceSongEverywhere(refreshedSong);
+          a.src = refreshedSong.audio;
+          a.load();
+          await a.play();
+          setCurrent(refreshedSong);
+          retryRef.current.delete(refreshedSong.id);
+          return;
+        } catch {}
+      }
+      if (song && !song.isPreview) {
+        try {
+          const fallbackSong = await findPreviewFallback(song);
+          if (fallbackSong?.audio) {
+            replaceSongEverywhere(fallbackSong);
+            a.src = fallbackSong.audio;
+            a.load();
+            await a.play();
+            setCurrent(fallbackSong);
+            return;
+          }
+        } catch {}
+      }
+      showToast("Audio unavailable — skipping…", "warn");
+      setTimeout(() => advanceQueueRef.current?.(1), 800);
+    });
+    audioRef.current = a;
+    return () => { a.pause(); a.src = ""; };
+  }, [replaceSongEverywhere]); // eslint-disable-line
+
+  /* ── Core catalog loader ── */
+  const loadSection = useCallback(async (sec, force = false) => {
+    if (!force && sectionCacheRef.current.has(sec.key)) {
+      return { key: sec.key, songs: sectionCacheRef.current.get(sec.key) };
+    }
+    const songs = [];
+    for (const q of sec.queries) {
+      const r = await runQuery(q, {
+        fallbackToMixed: true,
+        fullOnly: true,
+        iTunesLimit: 2,
+        audiusLimit: 28,
+      });
+      songs.push(...r);
+    }
+    const out = dedupe(songs);
+    sectionCacheRef.current.set(sec.key, out);
+    return { key: sec.key, songs: out };
+  }, [runQuery]);
+
+  const loadCatalog = useCallback(async (force = false) => {
+    const now = todayStr();
+    if (!force && lastFetch === now && Object.keys(catalog).length === CATALOG.length) return;
+
+    setLoadingHome(true);
+    setRefreshing(force);
+    if (force) {
+      sectionCacheRef.current.clear();
+      browseCacheRef.current.clear();
+      searchCacheRef.current.clear();
+      artistCacheRef.current.clear();
+    }
+    setCatalog({});
+    setLastFetch(now);
+
+    const results = await Promise.all(CATALOG.map((sec) => loadSection(sec, force)));
+    const newCat = {};
+    results.forEach((result) => { newCat[result.key] = result.songs; });
+    setCatalog(newCat);
+    const loadedSongs = results.flatMap((result) => result.songs);
+    if (loadedSongs.length) queueRef.current = loadedSongs;
+    setLoadingHome(false);
+    setRefreshing(false);
+
+    if (force) showToast("✅ Catalog refreshed!", "info");
+  }, [lastFetch, loadSection]);
+
+  useEffect(() => { loadCatalog(false); }, []); // eslint-disable-line
+
+  /* ── Search ── */
+  useEffect(() => {
+    const trimmed = searchQ.trim();
+    if (!trimmed) { if (view === "search") setView("home"); return; }
+    clearTimeout(searchTmr.current);
+    setView("search");
+    searchTmr.current = setTimeout(async () => {
+      const requestId = ++searchReqRef.current;
+      const query = buildDiscoveryTerm(`${trimmed} songs india`, contentFilter);
+      const cacheKey = `${contentFilter}::${trimmed.toLowerCase()}`;
+      if (searchCacheRef.current.has(cacheKey)) {
+        const cached = searchCacheRef.current.get(cacheKey);
+        setSearchRes(cached);
+        queueRef.current = cached;
+        setLoadingKey(null);
+        return;
+      }
+      setLoadingKey("search");
+      const r = applyContentFilter(
+        await runQuery(query, {
+          fullOnly: contentFilter === "full",
+          iTunesLimit: contentFilter === "full" ? 2 : 8,
+          audiusLimit: contentFilter === "full" ? 30 : 22,
+        }),
+        contentFilter
+      );
+      if (requestId !== searchReqRef.current) return;
+      searchCacheRef.current.set(cacheKey, r);
+      setSearchRes(r);
+      queueRef.current = r;
+      setLoadingKey(null);
+    }, 150);
+    return () => clearTimeout(searchTmr.current);
+  }, [searchQ, contentFilter, runQuery, view]);
+
+  /* ── Browse ── */
+  const loadBrowse = useCallback(async (ind, yr, kind) => {
+    const cacheKey = `${ind}::${yr || "all"}::${kind}`;
+    if (browseCacheRef.current.has(cacheKey)) {
+      const cached = browseCacheRef.current.get(cacheKey);
+      setBrowseList(cached);
+      queueRef.current = cached;
+      setLoadingKey(null);
+      return;
+    }
+
+    setLoadingKey("browse");
+    const relevantSections = ind === "all" ? CATALOG : CATALOG.filter((sec) => sec.cat === ind);
+    let baseSongs = dedupe(relevantSections.flatMap((sec) => catalog[sec.key] || []));
+
+    if (!baseSongs.length) {
+      const loaded = await Promise.all(relevantSections.map((sec) => loadSection(sec)));
+      baseSongs = dedupe(loaded.flatMap((result) => result.songs));
+      if (loaded.length) {
+        setCatalog((prev) => {
+          const next = { ...prev };
+          loaded.forEach((result) => { next[result.key] = result.songs; });
+          return next;
+        });
+      }
+    }
+
+    let out = applyContentFilter(applyYearFilter(baseSongs, yr), kind);
+
+    if (!out.length && (kind === "remix" || kind === "mashup")) {
+      const songs = [];
+      for (const sec of relevantSections.slice(0, 4)) {
+        for (const q of sec.queries.slice(0, 2)) {
+          const r = await runQuery(buildDiscoveryTerm(q, kind), {
+            iTunesLimit: 6,
+            audiusLimit: 20,
+          });
+          songs.push(...r);
+        }
+      }
+      out = applyContentFilter(applyYearFilter(dedupe(songs), yr), kind);
+    }
+
+    browseCacheRef.current.set(cacheKey, out);
+    setBrowseList(out);
+    queueRef.current = out;
+    setLoadingKey(null);
+  }, [catalog, loadSection, runQuery]);
+
+  useEffect(() => {
+    if (view === "browse") loadBrowse(industry, yearId, contentFilter);
+  }, [view, industry, yearId, contentFilter, loadBrowse]);
+
+  /* ── Artist ── */
+  const loadArtist = useCallback(async (name) => {
+    setArtistView(name);
+    setView("artist");
+    const cacheKey = `${name.toLowerCase()}::${contentFilter}`;
+    if (artistCacheRef.current.has(cacheKey)) {
+      const cached = artistCacheRef.current.get(cacheKey);
+      setArtistSongs(cached);
+      queueRef.current = cached;
+      setLoadingKey(null);
+      return;
+    }
+
+    setLoadingKey("artist");
+    const requestId = ++artistReqRef.current;
+    const query = buildDiscoveryTerm(`${name} songs`, contentFilter);
+    const r = applyContentFilter(
+      await runQuery(query, {
+        fullOnly: contentFilter === "full",
+        iTunesLimit: contentFilter === "full" ? 1 : 6,
+        audiusLimit: 28,
+      }),
+      contentFilter
+    );
+    if (requestId !== artistReqRef.current) return;
+    artistCacheRef.current.set(cacheKey, r);
+    setArtistSongs(r);
+    queueRef.current = r;
+    setLoadingKey(null);
+  }, [contentFilter, runQuery]);
+
+  const withYear = (list) => applyYearFilter(applyContentFilter(list, contentFilter), yearId);
+
+  const allSongs = dedupe([
+    ...Object.values(catalog).flat(),
+    ...searchRes,
+    ...browseList,
+    ...artistSongs,
+  ]);
+  const searchSongs = withYear(searchRes);
+  const artistList = withYear(artistSongs);
+  const librarySongs = withYear(allSongs);
+  const activeQueue = queueRef.current;
+  const activeQueueIndex = idxRef.current;
+  const upcomingQueue = activeQueue.length > 1
+    ? Array.from({ length: Math.min(activeQueue.length - 1, 8) }, (_, offset) =>
+        activeQueue[(activeQueueIndex + offset + 1 + activeQueue.length) % activeQueue.length]
+      ).filter(Boolean)
+    : [];
+
+  const ac = INDUSTRIES.find(i => i.id === industry)?.color || "#6366F1";
+
+  useEffect(() => {
+    if (view === "artist" && artistView) loadArtist(artistView);
+  }, [contentFilter]); // eslint-disable-line
+
+  /* ─────────────────────── RENDER ─────────────────────────── */
+  return (
+    <div style={{ display:"flex", flexDirection:"column", height:"100vh",
+      background:t.bg, color:t.text,
+      fontFamily:"'Inter', sans-serif", overflow:"hidden", userSelect:"none" }}>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+        * { box-sizing:border-box; margin:0; padding:0 }
+        ::-webkit-scrollbar { width:4px; height:4px }
+        ::-webkit-scrollbar-track { background:transparent }
+        ::-webkit-scrollbar-thumb { background:${dark?"#1e1e38":"#D1D5DB"}; border-radius:4px }
+        @keyframes wv  { 0%,100%{height:3px} 50%{height:100%} }
+        @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(99,102,241,.45)} 60%{box-shadow:0 0 0 10px rgba(99,102,241,0)} }
+        @keyframes slideUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes shimmer { 0%{background-position:-600px 0} 100%{background-position:600px 0} }
+        @keyframes toast { 0%{opacity:0;transform:translateX(-50%) translateY(8px)} 12%,85%{opacity:1;transform:translateX(-50%) translateY(0)} 100%{opacity:0} }
+        @keyframes spin { to{transform:rotate(360deg)} }
+        .slide { animation:slideUp .3s ease both }
+        button { font-family:'Inter',sans-serif; cursor:pointer }
+        input  { font-family:'Inter',sans-serif }
+        input::placeholder { color:${t.textMuted} }
+      `}</style>
+
+      {/* Toast */}
+      {toast.msg && (
+        <div style={{ position:"fixed", bottom:100, left:"50%", zIndex:9999,
+          transform:"translateX(-50%)", animation:"toast 2.6s ease forwards",
+          background:toast.type === "warn"
+            ? "rgba(239,68,68,0.96)"
+            : dark ? "rgba(20,20,38,0.97)" : "rgba(255,255,255,0.97)",
+          border:`1px solid ${dark?"rgba(255,255,255,.09)":"rgba(0,0,0,.08)"}`,
+          backdropFilter:"blur(20px)", borderRadius:28, padding:"9px 20px",
+          fontSize:13, fontWeight:600, color:t.text, boxShadow:"0 8px 32px rgba(0,0,0,.2)",
+          whiteSpace:"nowrap" }}>
+          {toast.msg}
+        </div>
+      )}
+
+      <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+
+        {/* ══════════════ SIDEBAR ══════════════ */}
+        {(sideOpen || !mobile) && (
+          <div style={{ width:228, background:t.sidebar,
+            borderRight:`1px solid ${t.sideB}`, display:"flex",
+            flexDirection:"column", flexShrink:0, overflowY:"auto",
+            position:mobile ? "fixed" : "relative", zIndex:mobile ? 200 : 1,
+            height:"100%", top:0, left:0,
+            backdropFilter:mobile ? "blur(20px)" : "none" }}>
+
+            {/* Logo */}
+            <div style={{ padding:"20px 18px 16px", borderBottom:`1px solid ${t.sideB}` }}>
+              <div style={{ fontSize:24, fontWeight:900, letterSpacing:"-0.8px", lineHeight:1 }}>
+                <span style={{ color:"#6366F1" }}>Groov</span>
+                <span style={{ color:t.text }}>ify</span>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:6 }}>
+                <div style={{ width:6, height:6, borderRadius:"50%",
+                  background: refreshing ? "#F59E0B" : "#22C55E",
+                  animation: refreshing ? "spin 1s linear infinite" : "none",
+                  boxShadow: refreshing ? "none" : "0 0 6px #22C55E" }} />
+                <span style={{ fontSize:9, color:t.textMuted, letterSpacing:"1.5px",
+                  textTransform:"uppercase", fontWeight:600 }}>
+                  {refreshing ? "Refreshing…" : `Live · ${todayStr()}`}
+                </span>
+              </div>
+            </div>
+
+            {/* Nav */}
+            <nav style={{ padding:"10px 8px 0" }}>
+              {[
+                { id:"home",    icon:"⌂",  label:"Home" },
+                { id:"search",  icon:"⌕",  label:"Search" },
+                { id:"browse",  icon:"◈",  label:"Browse" },
+                { id:"artists", icon:"◉",  label:"Artists" },
+                { id:"queue",   icon:"≡",  label:"Queue", badge: upcomingQueue.length || null },
+                { id:"recent",  icon:"⟳",  label:"Recent", badge: recentlyPlayed.length || null },
+                { id:"library", icon:"♫",  label:"Library", badge: allSongs.length || null },
+              ].map(n => (
+                <div key={n.id} onClick={() => { setView(n.id); if (mobile) setSideOpen(false); }}
+                  style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px",
+                    borderRadius:10, marginBottom:2, cursor:"pointer",
+                    background:view === n.id ? (dark?"rgba(99,102,241,.15)":"rgba(99,102,241,.1)") : "transparent",
+                    color:view === n.id ? "#6366F1" : t.textSub,
+                    fontWeight:view === n.id ? 700 : 500,
+                    fontSize:13.5, transition:"all .15s" }}>
+                  <span style={{ fontSize:15, lineHeight:1 }}>{n.icon}</span>
+                  <span style={{ flex:1 }}>{n.label}</span>
+                  {n.badge && <span style={{ fontSize:10, background:"#EF4444", color:"#fff",
+                    borderRadius:10, padding:"1px 7px", fontWeight:800 }}>{n.badge}</span>}
+                </div>
+              ))}
+            </nav>
+
+            {/* Industries */}
+            <div style={{ padding:"14px 8px 0" }}>
+              <div style={{ fontSize:9, color:t.textMuted, letterSpacing:"2px",
+                textTransform:"uppercase", padding:"0 12px 8px", fontWeight:700 }}>
+                Languages
+              </div>
+              {INDUSTRIES.map(i => (
+                <div key={i.id}
+                  onClick={() => { setIndustry(i.id); setView("browse"); if (mobile) setSideOpen(false); }}
+                  style={{ padding:"8px 12px", borderRadius:8, marginBottom:1, fontSize:13,
+                    color: industry === i.id && view === "browse" ? i.color : t.textSub,
+                    background: industry === i.id && view === "browse" ? `${i.color}18` : "transparent",
+                    fontWeight: industry === i.id && view === "browse" ? 700 : 500,
+                    cursor:"pointer", transition:"all .12s" }}>
+                  {i.emoji} {i.label}
+                </div>
+              ))}
+            </div>
+
+            {/* Refresh */}
+            <div style={{ padding:"14px 16px 18px", marginTop:"auto",
+              borderTop:`1px solid ${t.sideB}` }}>
+              <button onClick={() => loadCatalog(true)} disabled={refreshing}
+                style={{ width:"100%", padding:"9px", borderRadius:10,
+                  border:`1px solid ${t.sideB}`, background:t.hover,
+                  color:refreshing ? t.textMuted : t.textSub,
+                  fontSize:12.5, fontWeight:600, opacity:refreshing ? .6 : 1,
+                  display:"flex", alignItems:"center", justifyContent:"center", gap:7 }}>
+                <span style={{ display:"inline-block",
+                  animation:refreshing?"spin 1s linear infinite":"none" }}>🔄</span>
+                {refreshing ? "Refreshing…" : "Refresh Catalog"}
+              </button>
+              <div style={{ fontSize:10, color:t.textMuted, textAlign:"center", marginTop:6 }}>
+                Last: {lastFetch || "—"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {mobile && sideOpen && (
+          <div onClick={() => setSideOpen(false)}
+            style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:199 }} />
+        )}
+
+        {/* ══════════════ MAIN CONTENT ══════════════ */}
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+          {/* ── TOPBAR ── */}
+          <div style={{ background:t.topbar, backdropFilter:"blur(28px)",
+            borderBottom:`1px solid ${t.sideB}`, flexShrink:0, zIndex:10 }}>
+
+            {/* Header row */}
+            <div style={{ display:"flex", alignItems:"center", gap:12,
+              padding:"14px 20px 0" }}>
+              {mobile && (
+                <button onClick={() => setSideOpen(s => !s)}
+                  style={{ background:"none", border:"none", color:t.textSub,
+                    fontSize:21, padding:4, lineHeight:1 }}>☰</button>
+              )}
+
+              {/* Brand on header */}
+              <div style={{ fontSize:20, fontWeight:900, letterSpacing:"-0.6px",
+                flexShrink:0, display:mobile?"none":"flex", alignItems:"center", gap:2 }}>
+                <span style={{ color:"#6366F1" }}>Groov</span>
+                <span style={{ color:t.text }}>ify</span>
+              </div>
+
+              {/* Search */}
+              <div style={{ flex:1, position:"relative", maxWidth:500, margin:"0 auto" }}>
+                <span style={{ position:"absolute", left:14, top:"50%",
+                  transform:"translateY(-50%)", color:t.textMuted, fontSize:15,
+                  pointerEvents:"none" }}>⌕</span>
+                <input value={searchQ} onChange={e => setSearchQ(e.target.value)}
+                  placeholder="Search songs, artists, movies, albums…"
+                  style={{ width:"100%", background:t.input, border:`1px solid ${t.inputB}`,
+                    borderRadius:28, padding:"10px 40px 10px 42px", color:t.text,
+                    fontSize:13.5, outline:"none", transition:"border-color .2s" }} />
+                {searchQ && (
+                  <button onClick={() => setSearchQ("")}
+                    style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)",
+                      background:"none", border:"none", color:t.textMuted, fontSize:16 }}>✕</button>
+                )}
+              </div>
+
+              {/* Theme toggle + panel */}
+              <div style={{ display:"flex", gap:8, alignItems:"center", flexShrink:0 }}>
+                <button onClick={() => setDark(d => !d)}
+                  style={{ width:38, height:38, borderRadius:"50%",
+                    border:`1px solid ${t.sideB}`, background:t.hover,
+                    color:t.textSub, fontSize:16, display:"flex",
+                    alignItems:"center", justifyContent:"center" }}
+                  title={dark ? "Switch to Light" : "Switch to Dark"}>
+                  {dark ? "☀" : "🌙"}
+                </button>
+                {!mobile && (
+                  <button onClick={() => setShowPanel(s => !s)}
+                    style={{ padding:"8px 14px", borderRadius:20,
+                      border:`1px solid ${showPanel?"rgba(99,102,241,.4)":t.sideB}`,
+                      background:showPanel ? "rgba(99,102,241,.12)" : t.hover,
+                      color:showPanel ? "#6366F1" : t.textSub,
+                      fontSize:12, fontWeight:600 }}>
+                    {showPanel ? "◀ Close" : "Now Playing ▶"}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Filters */}
+            {(view === "browse" || view === "search" || view === "library" || view === "artist") && (
+              <div style={{ display:"flex", flexDirection:"column", gap:8, padding:"12px 20px" }}>
+                <div style={{ display:"flex", gap:6, overflowX:"auto", flexWrap:"nowrap" }}>
+                  {CONTENT_FILTERS.map((filter) => (
+                    <div key={filter.id} onClick={() => setContentFilter(filter.id)}
+                      style={{ padding:"5px 14px", borderRadius:20, fontSize:11, fontWeight:700,
+                        cursor:"pointer", whiteSpace:"nowrap", flexShrink:0,
+                        background:contentFilter === filter.id ? "#6366F1" : t.pill,
+                        color:contentFilter === filter.id ? "#fff" : t.textSub, transition:"all .15s" }}>
+                      {filter.label}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display:"flex", gap:6, overflowX:"auto", flexWrap:"nowrap" }}>
+                  <div onClick={() => setYearId(null)}
+                    style={{ padding:"5px 14px", borderRadius:20, fontSize:11, fontWeight:700,
+                      cursor:"pointer", whiteSpace:"nowrap", flexShrink:0,
+                      background:!yearId ? "#6366F1" : t.pill,
+                      color:!yearId ? "#fff" : t.textSub, transition:"all .15s" }}>
+                    All Years
+                  </div>
+                  {YEARS.map(y => (
+                    <div key={y.id} onClick={() => setYearId(y.id)}
+                      style={{ padding:"5px 14px", borderRadius:20, fontSize:11, fontWeight:700,
+                        cursor:"pointer", whiteSpace:"nowrap", flexShrink:0,
+                        background:yearId === y.id ? ac : t.pill,
+                        color:yearId === y.id ? "#fff" : t.textSub, transition:"all .15s" }}>
+                      {y.label}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── SCROLL AREA ── */}
+          <div style={{ flex:1, overflowY:"auto", padding:"24px 20px 20px" }}>
+
+            {/* ─ HOME ─ */}
+            {view === "home" && (
+              <div className="slide">
+                {/* Hero */}
+                <div style={{ borderRadius:20, marginBottom:36, padding:"30px 28px",
+                  position:"relative", overflow:"hidden",
+                  border:`1px solid ${t.divider}`,
+                  background: dark
+                    ? "linear-gradient(120deg,#1a0526 0%,#0c1630 50%,#1a0a1a 100%)"
+                    : "linear-gradient(120deg,#EEF2FF 0%,#F0F9FF 50%,#FDF4FF 100%)" }}>
+                  <div style={{ position:"absolute", top:-80, right:-60, width:320, height:320,
+                    borderRadius:"50%", background:"radial-gradient(circle,rgba(99,102,241,.18),transparent 65%)" }} />
+                  <div style={{ position:"absolute", bottom:-60, left:-60, width:240, height:240,
+                    borderRadius:"50%", background:"radial-gradient(circle,rgba(139,92,246,.13),transparent 65%)" }} />
+                  <div style={{ fontFamily:"Inter", fontSize:mobile?26:36, fontWeight:900,
+                    letterSpacing:"-1px", lineHeight:1.1, marginBottom:10, position:"relative" }}>
+                    <span style={{ color:"#6366F1" }}>Groov</span>
+                    <span style={{ color:t.text }}>ify</span>
+                    <br />
+                    <span style={{ fontSize:mobile?15:20, fontWeight:600,
+                      color:dark?"rgba(232,232,248,.5)":"rgba(20,20,42,.45)" }}>
+                      Every song. Every language. Free forever.
+                    </span>
+                  </div>
+                  <p style={{ fontSize:13, color:dark?"rgba(232,232,248,.38)":"rgba(20,20,42,.45)",
+                    lineHeight:1.75, maxWidth:520, marginBottom:22, position:"relative" }}>
+                    Bollywood · Telugu · Odia · Punjabi · Tamil · Folk · Devotional · Classics
+                    <br />Auto-refreshes daily · Real album art · Background playback
+                  </p>
+                  <div style={{ display:"flex", gap:9, flexWrap:"wrap", position:"relative" }}>
+                    {INDUSTRIES.slice(1, 7).map(i => (
+                      <button key={i.id}
+                        onClick={() => { setIndustry(i.id); setView("browse"); }}
+                        style={{ padding:"8px 16px", borderRadius:20,
+                          border:`1px solid ${i.color}40`,
+                          background:`${i.color}16`, color:i.color,
+                          fontSize:12.5, fontWeight:600 }}>
+                        {i.emoji} {i.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Sections */}
+                {loadingHome && Object.keys(catalog).length === 0 ? (
+                  [1,2,3].map(k => (
+                    <div key={k} style={{ marginBottom:36 }}>
+                      <div style={{ width:200, height:20, borderRadius:8, marginBottom:16,
+                        background:t.skelA }} />
+                      <div style={{ display:"flex", gap:14 }}>
+                        {[1,2,3,4,5].map(j => <Skel key={j} w={155} h={210} t={t} />)}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  CATALOG.filter(sec => catalog[sec.key]?.length > 0).map(sec => (
+                    <div key={sec.key} style={{ marginBottom:38 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
+                        <h2 style={{ fontSize:18, fontWeight:700, color:t.text,
+                          letterSpacing:"-0.2px" }}>{sec.label}</h2>
+                        <span style={{ fontSize:11, color:t.textMuted, fontWeight:500 }}>
+                          {catalog[sec.key].length} songs
+                        </span>
+                      </div>
+                      <div style={{ display:"flex", gap:14, overflowX:"auto", paddingBottom:8 }}>
+                        {catalog[sec.key].map(s => (
+                          <SongCard key={s.id} song={s} size={155} t={t}
+                            isCurrent={current?.id === s.id}
+                            isPlaying={current?.id === s.id && playing}
+                            liked={liked.has(s.id)}
+                            onPlay={() => playSong(s, catalog[sec.key])}
+                            onLike={() => toggleLike(s.id)} />
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* ─ SEARCH ─ */}
+            {view === "search" && (
+              <div className="slide">
+                <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22 }}>
+                  <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>"{searchQ}"</h2>
+                  <span style={{ fontSize:12, color:t.textMuted }}>{searchSongs.length} results</span>
+                </div>
+                {loadingKey === "search" ? (
+                  <div style={{ display:"flex", gap:14, flexWrap:"wrap" }}>
+                    {[1,2,3,4,5,6].map(k => <Skel key={k} w={155} h={210} t={t} />)}
+                  </div>
+                ) : searchSongs.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:48, marginBottom:14 }}>🎵</div>
+                    <div style={{ fontSize:20, fontWeight:700 }}>No results found</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Try a different search term</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    {searchSongs.map((s, i) => (
+                      <SongRow key={s.id} song={s} num={i+1} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={liked.has(s.id)}
+                        fmtTime={fmtTime}
+                        onPlay={() => playSong(s, searchSongs)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ─ BROWSE ─ */}
+            {view === "browse" && (
+              <div className="slide">
+                <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:22, flexWrap:"wrap" }}>
+                  <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>
+                    {INDUSTRIES.find(i => i.id === industry)?.emoji}{" "}
+                    {INDUSTRIES.find(i => i.id === industry)?.label || "All Music"}
+                  </h2>
+                  {yearId && (
+                    <span style={{ fontSize:11, padding:"3px 11px", borderRadius:12,
+                      background:`${ac}18`, color:ac, fontWeight:700 }}>
+                      {YEARS.find(y => y.id === yearId)?.label}
+                    </span>
+                  )}
+                  <span style={{ fontSize:12, color:t.textMuted, marginLeft:"auto" }}>
+                    {browseList.length} songs
+                  </span>
+                </div>
+                {loadingKey === "browse" ? (
+                  <div style={{ display:"grid",
+                    gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))", gap:16 }}>
+                    {[1,2,3,4,5,6,7,8].map(k => <Skel key={k} w="100%" h={210} t={t} />)}
+                  </div>
+                ) : browseList.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:42, marginBottom:12 }}>🔍</div>
+                    <div style={{ fontSize:18, fontWeight:700 }}>No songs match these filters</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Try another year, language, or content filter</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"grid",
+                    gridTemplateColumns:"repeat(auto-fill,minmax(155px,1fr))", gap:16 }}>
+                    {browseList.map(s => (
+                      <SongCard key={s.id} song={s} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={liked.has(s.id)}
+                        onPlay={() => playSong(s, browseList)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ─ ARTISTS ─ */}
+            {view === "artists" && (
+              <div className="slide">
+                <h2 style={{ fontSize:22, fontWeight:700, marginBottom:8, color:t.text }}>Artists</h2>
+                <p style={{ fontSize:13, color:t.textMuted, marginBottom:22 }}>
+                  Click any artist to load their full discography
+                </p>
+                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                  {["Arijit Singh","Shreya Ghoshal","AR Rahman","Devi Sri Prasad","Anirudh Ravichander",
+                    "Humane Sagar","Neha Kakkar","Diljit Dosanjh","Sid Sriram","Badshah",
+                    "Hardy Sandhu","Asha Bhosle","Kishore Kumar","Lata Mangeshkar","SP Balasubrahmanyam",
+                    "Anurag Kulkarni","Udit Narayan","Kumar Sanu","Alka Yagnik","Sunidhi Chauhan",
+                    "Sonu Nigam","Shankar Mahadevan","Hariharan","KK","Mohit Chauhan",
+                    "Aseema Panda","Kuldeep Pattnaik","Antara Nandy","Odia Humane Sagar"].map(a => (
+                    <button key={a} onClick={() => loadArtist(a)}
+                      style={{ padding:"8px 16px", borderRadius:22,
+                        border:`1px solid ${t.sideB}`, background:t.hover,
+                        color:t.textSub, fontSize:13, fontWeight:500,
+                        transition:"all .15s" }}
+                      onMouseEnter={e => { e.currentTarget.style.background=`rgba(99,102,241,.12)`; e.currentTarget.style.color="#6366F1"; e.currentTarget.style.borderColor="rgba(99,102,241,.35)"; }}
+                      onMouseLeave={e => { e.currentTarget.style.background=t.hover; e.currentTarget.style.color=t.textSub; e.currentTarget.style.borderColor=t.sideB; }}>
+                      {a}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ─ ARTIST SONGS ─ */}
+            {view === "artist" && (
+              <div className="slide">
+                <button onClick={() => setView("artists")}
+                  style={{ background:"none", border:"none", color:"#6366F1",
+                    fontSize:13, fontWeight:600, marginBottom:20,
+                    display:"flex", alignItems:"center", gap:6 }}>
+                  ← Artists
+                </button>
+                <div style={{ display:"flex", alignItems:"center", gap:18, marginBottom:26 }}>
+                  <div style={{ width:84, height:84, borderRadius:"50%", overflow:"hidden",
+                    flexShrink:0, background:t.skelA }}>
+                    {artistList[0]?.art
+                      ? <Img src={artistList[0].art} style={{ width:84, height:84 }} />
+                      : <div style={{ width:84, height:84,
+                          background:"linear-gradient(135deg,#6366F1,#8B5CF6)",
+                          display:"flex", alignItems:"center", justifyContent:"center",
+                          fontSize:32, fontWeight:900, color:"#fff" }}>
+                          {artistView?.[0]}
+                        </div>
+                    }
+                  </div>
+                  <div>
+                    <div style={{ fontSize:26, fontWeight:800, color:t.text }}>{artistView}</div>
+                    <div style={{ fontSize:13, color:t.textMuted, marginTop:4 }}>
+                      {artistList.length} tracks
+                    </div>
+                  </div>
+                </div>
+                {loadingKey === "artist" ? (
+                  <div style={{ display:"flex", gap:14, flexWrap:"wrap" }}>
+                    {[1,2,3,4,5].map(k => <Skel key={k} w={155} h={210} t={t} />)}
+                  </div>
+                ) : artistList.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:42, marginBottom:12 }}>🎤</div>
+                    <div style={{ fontSize:18, fontWeight:700 }}>No tracks match these filters</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Try a different year or content type</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    {artistList.map((s, i) => (
+                      <SongRow key={s.id} song={s} num={i+1} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={liked.has(s.id)}
+                        fmtTime={fmtTime}
+                        onPlay={() => playSong(s, artistList)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ─ LIBRARY ─ */}
+            {view === "library" && (
+              <div className="slide">
+                <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22, flexWrap:"wrap" }}>
+                  <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>♫ All Songs Library</h2>
+                  <span style={{ fontSize:12, color:t.textMuted }}>{librarySongs.length} songs loaded</span>
+                </div>
+                {librarySongs.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:48, marginBottom:14 }}>♫</div>
+                    <div style={{ fontSize:20, fontWeight:700 }}>No songs match these filters yet</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Home, Search, Browse, and Artists add songs into the library cache</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    {librarySongs.map((s, i) => (
+                      <SongRow key={s.id} song={s} num={i+1} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={liked.has(s.id)}
+                        fmtTime={fmtTime}
+                        onPlay={() => playSong(s, librarySongs)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ─ QUEUE ─ */}
+            {view === "queue" && (
+              <div className="slide">
+                <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22, flexWrap:"wrap" }}>
+                  <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>≡ Queue</h2>
+                  <span style={{ fontSize:12, color:t.textMuted }}>{activeQueue.length} songs</span>
+                </div>
+                {activeQueue.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:48, marginBottom:14 }}>≡</div>
+                    <div style={{ fontSize:20, fontWeight:700 }}>Queue is empty</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Play any song from Home, Search, Browse, or Library</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    {activeQueue.map((s, i) => (
+                      <SongRow key={`${s.id}-${i}`} song={s} num={i+1} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={liked.has(s.id)}
+                        fmtTime={fmtTime}
+                        onPlay={() => playSong(s, activeQueue)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ─ RECENT ─ */}
+            {view === "recent" && (
+              <div className="slide">
+                <div style={{ display:"flex", alignItems:"baseline", gap:12, marginBottom:22, flexWrap:"wrap" }}>
+                  <h2 style={{ fontSize:22, fontWeight:700, color:t.text }}>⟳ Recently Played</h2>
+                  <span style={{ fontSize:12, color:t.textMuted }}>{recentlyPlayed.length} songs</span>
+                </div>
+                {recentlyPlayed.length === 0 ? (
+                  <div style={{ textAlign:"center", padding:"60px 0", color:t.textMuted }}>
+                    <div style={{ fontSize:48, marginBottom:14 }}>⟳</div>
+                    <div style={{ fontSize:20, fontWeight:700 }}>No recent songs yet</div>
+                    <div style={{ fontSize:13, marginTop:8 }}>Your play history will appear here</div>
+                  </div>
+                ) : (
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    {recentlyPlayed.map((s, i) => (
+                      <SongRow key={`${s.id}-${i}`} song={s} num={i+1} t={t}
+                        isCurrent={current?.id === s.id}
+                        isPlaying={current?.id === s.id && playing}
+                        liked={liked.has(s.id)}
+                        fmtTime={fmtTime}
+                        onPlay={() => playSong(s, recentlyPlayed)}
+                        onLike={() => toggleLike(s.id)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+          </div>
+        </div>
+
+        {/* ══════════════ NOW PLAYING PANEL ══════════════ */}
+        {showPanel && current && (
+          <div style={mobile
+            ? { position:"fixed", inset:0, zIndex:300, background:"rgba(0,0,0,.45)" }
+            : { width:288, background:t.panelBg,
+                borderLeft:`1px solid ${t.sideB}`, display:"flex",
+                flexDirection:"column", overflow:"hidden", flexShrink:0,
+                backdropFilter:"blur(20px)" }}>
+            {mobile && (
+              <div onClick={() => setShowPanel(false)}
+                style={{ position:"absolute", inset:0 }} />
+            )}
+            <div style={mobile
+              ? { position:"absolute", left:0, right:0, bottom:0, maxHeight:"74vh",
+                  background:t.panelBg, borderTopLeftRadius:22, borderTopRightRadius:22,
+                  border:`1px solid ${t.sideB}`, overflow:"hidden", backdropFilter:"blur(20px)" }
+              : { display:"flex", flexDirection:"column", overflow:"hidden", flexShrink:0, height:"100%" }}>
+            <div style={{ padding:"17px 17px 0", display:"flex",
+              justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontSize:9, fontWeight:800, letterSpacing:"2px",
+                color:t.textMuted, textTransform:"uppercase" }}>Now Playing</span>
+              <button onClick={() => setShowPanel(false)}
+                style={{ background:"none", border:"none", color:t.textMuted, fontSize:16 }}>✕</button>
+            </div>
+            <div style={{ flex:1, overflowY:"auto", padding:"14px 17px 17px" }}>
+              <div style={{ aspectRatio:"1", borderRadius:16, overflow:"hidden", marginBottom:18,
+                background:t.skelA, boxShadow:`0 20px 60px rgba(0,0,0,${dark ? 0.4 : 0.15})` }}>
+                <Img src={current.artBig} style={{ width:"100%", height:"100%" }} />
+              </div>
+              <div style={{ fontSize:18, fontWeight:700, marginBottom:3,
+                color:t.text, lineHeight:1.2 }}>{current.title}</div>
+              <div style={{ fontSize:13, color:"#6366F1", fontWeight:600, marginBottom:4,
+                cursor:"pointer" }} onClick={() => loadArtist(current.artist)}>
+                {current.artist}
+              </div>
+              <div style={{ fontSize:12, color:t.textMuted, marginBottom:16 }}>{current.album}</div>
+              {[["Year",current.year],["Genre",current.genre],["Source",current.source]]
+                .filter(([,v]) => v).map(([l,v]) => (
+                  <div key={l} style={{ display:"flex", justifyContent:"space-between",
+                    padding:"8px 0", borderBottom:`1px solid ${t.divider}` }}>
+                    <span style={{ fontSize:10, color:t.textMuted, textTransform:"uppercase",
+                      letterSpacing:".8px", fontWeight:700 }}>{l}</span>
+                    <span style={{ fontSize:12, color:t.textSub, textAlign:"right" }}>{v}</span>
+                  </div>
+                ))}
+              <div style={{ marginTop:12, padding:"9px 12px", borderRadius:10,
+                background:current.isPreview ? t.badgePrev : t.badgeFull,
+                border:`1px solid ${current.isPreview?"rgba(148,163,184,.15)":"rgba(16,185,129,.2)"}` }}>
+                <span style={{ fontSize:11, fontWeight:700,
+                  color:current.isPreview ? "#94A3B8" : "#10B981" }}>
+                  {current.isPreview ? "⚡ 30-Second iTunes Preview" : "✅ Full Song via Audius"}
+                </span>
+              </div>
+              {current.storeUrl && (
+                <a href={current.storeUrl} target="_blank" rel="noreferrer"
+                  style={{ display:"block", marginTop:12, padding:"9px", textAlign:"center",
+                    borderRadius:10, border:`1px solid ${t.sideB}`, background:t.hover,
+                    color:t.textSub, fontSize:12, textDecoration:"none", fontWeight:600 }}>
+                  Open Full Song ↗
+                </a>
+              )}
+              {upcomingQueue.length > 0 && (
+                <div style={{ marginTop:18 }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                    <span style={{ fontSize:10, color:t.textMuted, textTransform:"uppercase",
+                      letterSpacing:"1.2px", fontWeight:800 }}>
+                      Up Next
+                    </span>
+                    <span style={{ fontSize:11, color:t.textMuted }}>{activeQueue.length} in queue</span>
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                    {upcomingQueue.map((song, index) => (
+                      <div key={`${song.id}-${index}`} onClick={() => playSong(song, activeQueue)}
+                        style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 9px",
+                          borderRadius:10, cursor:"pointer", background:t.hover }}>
+                        <div style={{ width:34, height:34, borderRadius:8, overflow:"hidden", flexShrink:0,
+                          background:t.skelA }}>
+                          <Img src={song.artSm} style={{ width:34, height:34 }} />
+                        </div>
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontSize:12.5, color:t.text, fontWeight:600,
+                            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {song.title}
+                          </div>
+                          <div style={{ fontSize:11, color:t.textSub,
+                            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {song.artist}
+                          </div>
+                        </div>
+                        <div style={{ fontSize:10, color:t.textMuted, flexShrink:0 }}>
+                          {fmtTime(song.dur)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ══════════════ BOTTOM PLAYER ══════════════ */}
+      {current ? (
+        <div style={{ height:mobile?82:78, background:t.player,
+          borderTop:`1px solid ${t.playerB}`,
+          backdropFilter:"blur(32px)", display:"flex", alignItems:"center",
+          gap:mobile?8:14, padding:mobile?"0 12px":"0 22px",
+          flexShrink:0, zIndex:100,
+          boxShadow:dark?"none":"0 -4px 24px rgba(0,0,0,.08)" }}>
+
+          {/* Song info */}
+          <div style={{ display:"flex", alignItems:"center", gap:10,
+            minWidth:mobile?110:185, width:mobile?"34%":"22%", overflow:"hidden" }}>
+            <div style={{ width:44, height:44, borderRadius:9, overflow:"hidden",
+              flexShrink:0, background:t.skelA,
+              boxShadow:playing?"0 0 18px rgba(99,102,241,.3)":"none",
+              transition:"box-shadow .3s" }}>
+              <Img src={current.artSm} style={{ width:44, height:44 }} />
+            </div>
+            <div style={{ overflow:"hidden", flex:1, minWidth:0 }}>
+              <div style={{ fontSize:mobile?11.5:13, fontWeight:600, color:t.text,
+                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                {current.title}
+              </div>
+              <div style={{ fontSize:mobile?10.5:11.5, color:t.textSub, marginTop:1, cursor:"pointer",
+                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}
+                onClick={() => loadArtist(current.artist)}>
+                {current.artist}
+              </div>
+            </div>
+            <button onClick={() => toggleLike(current.id)}
+              style={{ background:"none", border:"none", fontSize:16, flexShrink:0,
+                color:liked.has(current.id) ? "#EF4444" : t.textMuted }}>
+              {liked.has(current.id) ? "♥" : "♡"}
+            </button>
+          </div>
+
+          {/* Controls */}
+          <div style={{ flex:1, display:"flex", flexDirection:"column",
+            alignItems:"center", gap:mobile?4:7 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:mobile?10:22 }}>
+              <button onClick={() => setShuffle(s => !s)}
+                style={{ background:"none", border:"none", fontSize:14,
+                  color:shuffle ? "#6366F1" : t.textMuted }}>⇄</button>
+              <button onClick={() => advanceQueue(-1)}
+                style={{ background:"none", border:"none",
+                  fontSize:mobile?22:24, color:t.textSub }}>⏮</button>
+              <button
+                onClick={() => { const a = audioRef.current; if (!a) return; a.paused ? a.play().catch(()=>{}) : a.pause(); }}
+                style={{ width:mobile?40:44, height:mobile?40:44, borderRadius:"50%",
+                  background:"linear-gradient(135deg,#6366F1,#4F46E5)", border:"none",
+                  color:"#fff", fontSize:mobile?18:20, flexShrink:0,
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  boxShadow:"0 0 20px rgba(99,102,241,.45)",
+                  animation:playing?"pulse 2.2s ease-in-out infinite":"none" }}>
+                {playing ? "⏸" : "▶"}
+              </button>
+              <button onClick={() => advanceQueue(1)}
+                style={{ background:"none", border:"none",
+                  fontSize:mobile?22:24, color:t.textSub }}>⏭</button>
+              <button onClick={() => setRepeat(s => !s)}
+                style={{ background:"none", border:"none", fontSize:14,
+                  color:repeat ? "#6366F1" : t.textMuted }}>↺</button>
+            </div>
+
+            {/* Progress bar */}
+            <div style={{ width:"100%", maxWidth:mobile?250:480,
+              display:"flex", alignItems:"center", gap:9 }}>
+              <span style={{ fontSize:10, color:t.textMuted, minWidth:32,
+                textAlign:"right", flexShrink:0 }}>{fmtTime(curTime)}</span>
+              <div onClick={seek}
+                style={{ flex:1, height:4, background:dark?"rgba(255,255,255,.08)":"rgba(0,0,0,.1)",
+                  borderRadius:4, cursor:"pointer", position:"relative" }}>
+                <div style={{ height:"100%", width:`${Math.min(progress*100,100)}%`,
+                  background:"linear-gradient(90deg,#6366F1,#8B5CF6)",
+                  borderRadius:4, transition:"width .1s linear", position:"relative" }}>
+                  <div style={{ position:"absolute", right:-5, top:"50%",
+                    transform:"translateY(-50%)", width:10, height:10,
+                    borderRadius:"50%", background:"#6366F1",
+                    boxShadow:"0 0 8px rgba(99,102,241,.8)" }} />
+                </div>
+              </div>
+              <span style={{ fontSize:10, color:t.textMuted, minWidth:32, flexShrink:0 }}>
+                {fmtTime(totalDur)}
+              </span>
+            </div>
+          </div>
+
+          {/* Volume */}
+          {!mobile && (
+            <div style={{ display:"flex", alignItems:"center", gap:10,
+              minWidth:165, justifyContent:"flex-end" }}>
+              <button onClick={() => setShowPanel(s => !s)}
+                style={{ padding:"6px 11px", borderRadius:16,
+                  border:`1px solid ${showPanel?"rgba(99,102,241,.4)":t.sideB}`,
+                  background:showPanel ? "rgba(99,102,241,.1)" : t.hover,
+                  color:showPanel ? "#6366F1" : t.textSub,
+                  fontSize:11, fontWeight:600 }}>
+                ≡ Info
+              </button>
+              <button onClick={() => setMuted(s => !s)}
+                style={{ background:"none", border:"none", fontSize:15,
+                  color:muted ? "#6366F1" : t.textMuted }}>
+                {muted ? "🔇" : "🔊"}
+              </button>
+              <input type="range" min={0} max={1} step={0.01} value={muted ? 0 : vol}
+                onChange={e => { setVol(+e.target.value); setMuted(false); }}
+                style={{ width:76, accentColor:"#6366F1", cursor:"pointer" }} />
+            </div>
+          )}
+          {mobile && (
+            <div style={{ width:"18%", display:"flex", justifyContent:"flex-end" }}>
+              <button onClick={() => setShowPanel(s => !s)}
+                style={{ background:"none", border:"none", fontSize:16, color:t.textMuted }}>
+                ≡
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ height:52, background:t.player, borderTop:`1px solid ${t.playerB}`,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          flexShrink:0, gap:10 }}>
+          <span style={{ fontSize:18 }}>🎵</span>
+          <span style={{ fontSize:12, color:t.textMuted, letterSpacing:"1.5px",
+            textTransform:"uppercase", fontWeight:600 }}>
+            Search or browse to start listening
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
