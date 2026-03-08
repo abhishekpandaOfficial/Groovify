@@ -1538,7 +1538,7 @@ export default function Groovify() {
                     style={{ padding:"8px 12px", borderRadius:20,
                       border:`1px solid ${t.sideB}`, background:t.hover,
                       color:t.textSub, fontSize:12, fontWeight:600 }}>
-                    Upload
+                    Upload Your Music
                   </button>
                 )}
                 <button onClick={() => setSupportOpen(true)}
@@ -1555,16 +1555,6 @@ export default function Groovify() {
                   title={dark ? "Switch to Light" : "Switch to Dark"}>
                   {dark ? "☀" : "🌙"}
                 </button>
-                {!mobile && (
-                  <button onClick={() => setShowPanel(s => !s)}
-                    style={{ padding:"8px 14px", borderRadius:20,
-                      border:`1px solid ${showPanel?"rgba(99,102,241,.4)":t.sideB}`,
-                      background:showPanel ? "rgba(99,102,241,.12)" : t.hover,
-                      color:showPanel ? "#6366F1" : t.textSub,
-                      fontSize:12, fontWeight:600 }}>
-                    {showPanel ? "Close Player" : "Now Playing"}
-                  </button>
-                )}
               </div>
             </div>
 
