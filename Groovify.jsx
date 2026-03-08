@@ -3,6 +3,7 @@ import { CATALOG, CONTENT_FILTERS, INDUSTRIES, YEARS } from "./config/constants"
 import { DARK, LIGHT } from "./config/themes";
 import Img from "./components/Img";
 import Skel from "./components/Skel";
+import Brand from "./components/Brand";
 import SongCard from "./components/SongCard";
 import SongRow from "./components/SongRow";
 import { dedupe, fetchBoth, findPreviewFallback, refreshSongStream } from "./utils/api";
@@ -493,10 +494,7 @@ export default function Groovify() {
 
             {/* Logo */}
             <div style={{ padding:"20px 18px 16px", borderBottom:`1px solid ${t.sideB}` }}>
-              <div style={{ fontSize:24, fontWeight:900, letterSpacing:"-0.8px", lineHeight:1 }}>
-                <span style={{ color:"#6366F1" }}>Groov</span>
-                <span style={{ color:t.text }}>ify</span>
-              </div>
+              <Brand t={t} size={38} />
               <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:6 }}>
                 <div style={{ width:6, height:6, borderRadius:"50%",
                   background: refreshing ? "#F59E0B" : "#22C55E",
@@ -596,10 +594,8 @@ export default function Groovify() {
               )}
 
               {/* Brand on header */}
-              <div style={{ fontSize:20, fontWeight:900, letterSpacing:"-0.6px",
-                flexShrink:0, display:mobile?"none":"flex", alignItems:"center", gap:2 }}>
-                <span style={{ color:"#6366F1" }}>Groov</span>
-                <span style={{ color:t.text }}>ify</span>
+              <div style={{ flexShrink:0, display:mobile?"none":"flex", alignItems:"center" }}>
+                <Brand t={t} size={30} compact />
               </div>
 
               {/* Search */}
@@ -697,8 +693,9 @@ export default function Groovify() {
                     borderRadius:"50%", background:"radial-gradient(circle,rgba(139,92,246,.13),transparent 65%)" }} />
                   <div style={{ fontFamily:"Inter", fontSize:mobile?26:36, fontWeight:900,
                     letterSpacing:"-1px", lineHeight:1.1, marginBottom:10, position:"relative" }}>
-                    <span style={{ color:"#6366F1" }}>Groov</span>
-                    <span style={{ color:t.text }}>ify</span>
+                    <span style={{ display:"inline-flex", marginBottom:8 }}>
+                      <Brand t={t} size={mobile ? 42 : 50} />
+                    </span>
                     <br />
                     <span style={{ fontSize:mobile?15:20, fontWeight:600,
                       color:dark?"rgba(232,232,248,.5)":"rgba(20,20,42,.45)" }}>
@@ -1127,6 +1124,11 @@ export default function Groovify() {
           {/* Song info */}
           <div style={{ display:"flex", alignItems:"center", gap:10,
             minWidth:mobile?110:185, width:mobile?"34%":"22%", overflow:"hidden" }}>
+            <img
+              src="/groovify-icon.svg"
+              alt="Groovify"
+              style={{ width:mobile ? 18 : 20, height:mobile ? 18 : 20, flexShrink:0, opacity:0.95 }}
+            />
             <div style={{ width:44, height:44, borderRadius:9, overflow:"hidden",
               flexShrink:0, background:t.skelA,
               boxShadow:playing?"0 0 18px rgba(99,102,241,.3)":"none",
@@ -1237,7 +1239,7 @@ export default function Groovify() {
         <div style={{ height:52, background:t.player, borderTop:`1px solid ${t.playerB}`,
           display:"flex", alignItems:"center", justifyContent:"center",
           flexShrink:0, gap:10 }}>
-          <span style={{ fontSize:18 }}>🎵</span>
+          <img src="/groovify-icon.svg" alt="Groovify" style={{ width:22, height:22, display:"block" }} />
           <span style={{ fontSize:12, color:t.textMuted, letterSpacing:"1.5px",
             textTransform:"uppercase", fontWeight:600 }}>
             Search or browse to start listening
