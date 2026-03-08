@@ -21,7 +21,8 @@ npm run dev
 
 ## Notes
 
-- This app fetches music data from the iTunes Search API and Audius.
+- This app fetches music data from the iTunes Search API and Audius through a local `/api/music-search` route.
+- In development, Vite serves that route with middleware so provider requests stay server-side.
 - If audio autoplay is blocked by the browser, click play manually once.
 
 ## Support Setup

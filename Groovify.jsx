@@ -55,15 +55,15 @@ const buildDiscoveryTerm = (term, contentFilter) => {
   return term;
 };
 
-const STORAGE_KEYS = {
-  session: "groovify_session_v1",
-  users: "groovify_users_v1",
+const SUPPORT_MINIMUMS = {
+  INR: 50,
+  USD: 2.5,
 };
 
-const SUPPORT_AMOUNTS = [
-  { id: "inr_50", label: "INR 50", amount: 5000, currency: "INR", display: "Rs50" },
-  { id: "usd_5", label: "USD 5", amount: 500, currency: "USD", display: "$5" },
-];
+const STORAGE_KEYS = {
+  users: "groovify_users",
+  session: "groovify_session",
+};
 
 // ═══════════════════════════════ MAIN ════════════════════════════
 export default function Groovify() {
@@ -92,7 +92,8 @@ export default function Groovify() {
   const [currentUser, setCurrentUser] = useState(null);
   const [supportOpen, setSupportOpen] = useState(false);
   const [supportLoading, setSupportLoading] = useState(false);
-  const [supportOption, setSupportOption] = useState(SUPPORT_AMOUNTS[0]);
+  const [supportCurrency, setSupportCurrency] = useState("INR");
+  const [supportAmountInput, setSupportAmountInput] = useState("");
   const [current,     setCurrent]     = useState(null);
   const [playing,     setPlaying]     = useState(false);
   const [progress,    setProgress]    = useState(0);
@@ -119,12 +120,17 @@ export default function Groovify() {
   const repeatRef  = useRef(false);
   const searchTmr  = useRef(null);
   const retryRef   = useRef(new Set());
+  const pausedByUserRef = useRef(false);
   const sectionCacheRef = useRef(new Map());
   const browseCacheRef = useRef(new Map());
   const searchCacheRef = useRef(new Map());
   const artistCacheRef = useRef(new Map());
   const searchReqRef = useRef(0);
   const artistReqRef = useRef(0);
+  const supportAmount = Number(supportAmountInput);
+  const supportMinimum = SUPPORT_MINIMUMS[supportCurrency];
+  const supportAmountValid = Number.isFinite(supportAmount) && supportAmount >= supportMinimum;
+  const supportAmountLabel = supportCurrency === "INR" ? `Rs${supportMinimum}` : `$${supportMinimum}`;
 
   useEffect(() => { shuffleRef.current = shuffle; }, [shuffle]);
   useEffect(() => { repeatRef.current  = repeat;  }, [repeat]);
@@ -191,6 +197,7 @@ export default function Groovify() {
   const loadAndPlay = (song, qi) => {
     const a = audioRef.current; if (!a || !song?.audio) return;
     retryRef.current.delete(song.id);
+    pausedByUserRef.current = false;
     a.src = song.audio; a.load();
     a.play()
       .then(() => {
@@ -211,11 +218,29 @@ export default function Groovify() {
     queueRef.current = q;
     if (current?.id === song.id) {
       const a = audioRef.current;
-      a.paused ? a.play().catch(() => {}) : a.pause();
+      if (a.paused) {
+        pausedByUserRef.current = false;
+        a.play().catch(() => {});
+      } else {
+        pausedByUserRef.current = true;
+        a.pause();
+      }
     } else {
       loadAndPlay(song, qi >= 0 ? qi : 0);
     }
   }, [current]); // eslint-disable-line
+
+  const togglePlayback = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) {
+      pausedByUserRef.current = false;
+      a.play().catch(() => {});
+    } else {
+      pausedByUserRef.current = true;
+      a.pause();
+    }
+  };
 
   const seek = e => {
     const a = audioRef.current; if (!a) return;
@@ -311,7 +336,11 @@ export default function Groovify() {
   const handleRazorpaySupport = async () => {
     const razorpayKey = import.meta.env.VITE_RAZORPAY_KEY_ID;
     if (!razorpayKey) {
-      showToast("Missing Razorpay public key.", "warn");
+      showToast("Payments are unavailable right now.", "warn");
+      return;
+    }
+    if (!supportAmountValid) {
+      showToast(`Enter at least ${supportAmountLabel}.`, "warn");
       return;
     }
 
@@ -328,8 +357,8 @@ export default function Groovify() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          amount: supportOption.amount,
-          currency: supportOption.currency,
+          amount: Math.round(supportAmount * 100),
+          currency: supportCurrency,
           note: "Support Groovify",
         }),
       });
@@ -348,7 +377,7 @@ export default function Groovify() {
         theme: { color: "#6366F1" },
         notes: {
           product: "Groovify Support",
-          selected_amount: supportOption.display,
+          selected_amount: `${supportCurrency} ${supportAmount}`,
         },
         prefill: currentUser ? {
           name: currentUser.name,
@@ -360,17 +389,21 @@ export default function Groovify() {
         },
       });
       razorpay.open();
-    } catch (error) {
-      showToast(error.message || "Unable to start payment.", "warn");
+    } catch {
+      showToast("Unable to start payment right now.", "warn");
     } finally {
       setSupportLoading(false);
     }
   };
 
   const handlePatreonSupport = () => {
+    if (!supportAmountValid) {
+      showToast(`Enter at least ${supportAmountLabel}.`, "warn");
+      return;
+    }
     const patreonUrl = import.meta.env.VITE_PATREON_URL;
     if (!patreonUrl) {
-      showToast("Set VITE_PATREON_URL for the Patreon button.", "warn");
+      showToast("Support link is unavailable right now.", "warn");
       return;
     }
     window.open(patreonUrl, "_blank", "noopener,noreferrer");
@@ -392,8 +425,8 @@ export default function Groovify() {
   const runQuery = useCallback(async (term, {
     fallbackToMixed = false,
     fullOnly = false,
-    iTunesLimit = 8,
-    audiusLimit = 20,
+    iTunesLimit = 6,
+    audiusLimit = 12,
   } = {}) => {
     const results = await fetchBoth(term, iTunesLimit, audiusLimit, { fullOnly });
     if (results.length || !fullOnly || !fallbackToMixed) return results;
@@ -435,10 +468,12 @@ export default function Groovify() {
       if (song?.audiusTrackId && !retryRef.current.has(song.id)) {
         retryRef.current.add(song.id);
         try {
+          if (pausedByUserRef.current) return;
           const refreshedSong = await refreshSongStream(song);
           replaceSongEverywhere(refreshedSong);
           a.src = refreshedSong.audio;
           a.load();
+          if (pausedByUserRef.current) return;
           await a.play();
           setCurrent(refreshedSong);
           retryRef.current.delete(refreshedSong.id);
@@ -447,11 +482,13 @@ export default function Groovify() {
       }
       if (song && !song.isPreview) {
         try {
+          if (pausedByUserRef.current) return;
           const fallbackSong = await findPreviewFallback(song);
           if (fallbackSong?.audio) {
             replaceSongEverywhere(fallbackSong);
             a.src = fallbackSong.audio;
             a.load();
+            if (pausedByUserRef.current) return;
             await a.play();
             setCurrent(fallbackSong);
             return;
@@ -476,7 +513,7 @@ export default function Groovify() {
         fallbackToMixed: true,
         fullOnly: true,
         iTunesLimit: 2,
-        audiusLimit: 28,
+        audiusLimit: 10,
       });
       songs.push(...r);
     }
@@ -500,7 +537,10 @@ export default function Groovify() {
     setCatalog({});
     setLastFetch(now);
 
-    const results = await Promise.all(CATALOG.map((sec) => loadSection(sec, force)));
+    const results = [];
+    for (const sec of CATALOG) {
+      results.push(await loadSection(sec, force));
+    }
     const newCat = {};
     results.forEach((result) => { newCat[result.key] = result.songs; });
     setCatalog(newCat);
@@ -540,7 +580,7 @@ export default function Groovify() {
         await runQuery(query, {
           fullOnly: contentFilter === "full",
           iTunesLimit: contentFilter === "full" ? 2 : 8,
-          audiusLimit: contentFilter === "full" ? 30 : 22,
+          audiusLimit: contentFilter === "full" ? 12 : 14,
         }),
         contentFilter
       );
@@ -569,7 +609,10 @@ export default function Groovify() {
     let baseSongs = dedupe(relevantSections.flatMap((sec) => catalog[sec.key] || []));
 
     if (!baseSongs.length) {
-      const loaded = await Promise.all(relevantSections.map((sec) => loadSection(sec)));
+      const loaded = [];
+      for (const sec of relevantSections) {
+        loaded.push(await loadSection(sec));
+      }
       baseSongs = dedupe(loaded.flatMap((result) => result.songs));
       if (loaded.length) {
         setCatalog((prev) => {
@@ -588,7 +631,7 @@ export default function Groovify() {
         for (const q of sec.queries.slice(0, 2)) {
           const r = await runQuery(buildDiscoveryTerm(q, kind), {
             iTunesLimit: 6,
-            audiusLimit: 20,
+            audiusLimit: 12,
           });
           songs.push(...r);
         }
@@ -626,7 +669,7 @@ export default function Groovify() {
       await runQuery(query, {
         fullOnly: contentFilter === "full",
         iTunesLimit: contentFilter === "full" ? 1 : 6,
-        audiusLimit: 28,
+        audiusLimit: 12,
       }),
       contentFilter
     );
@@ -774,36 +817,44 @@ export default function Groovify() {
             <div style={{ fontSize:22, fontWeight:800, color:t.text, marginBottom:8 }}>
               Keep Groovify open and free
             </div>
-            <div style={{ fontSize:13, color:t.textSub, lineHeight:1.7, marginBottom:18 }}>
-              Support hosting, API calls, and future features. Choose a starter amount and donate with Razorpay or Patreon.
-            </div>
-            <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:18 }}>
-              {SUPPORT_AMOUNTS.map((option) => (
-                <button key={option.id} onClick={() => setSupportOption(option)}
-                  style={{ padding:"10px 14px", borderRadius:18,
-                    border:`1px solid ${supportOption.id === option.id ? "#6366F1" : t.sideB}`,
-                    background:supportOption.id === option.id ? "rgba(99,102,241,.15)" : t.hover,
-                    color:supportOption.id === option.id ? "#6366F1" : t.textSub,
-                    fontSize:13, fontWeight:700 }}>
-                  {option.label}
+            <div style={{ display:"flex", gap:10, marginBottom:14 }}>
+              {["INR", "USD"].map((currency) => (
+                <button key={currency} onClick={() => setSupportCurrency(currency)}
+                  style={{ flex:1, padding:"11px 14px", borderRadius:16,
+                    border:`1px solid ${supportCurrency === currency ? "#6366F1" : t.sideB}`,
+                    background:supportCurrency === currency ? "rgba(99,102,241,.15)" : t.hover,
+                    color:supportCurrency === currency ? "#6366F1" : t.textSub,
+                    fontSize:13, fontWeight:800 }}>
+                  {currency}
                 </button>
               ))}
             </div>
+            <div style={{ marginBottom:18 }}>
+              <input
+                type="number"
+                min={supportMinimum}
+                step={supportCurrency === "INR" ? "1" : "0.1"}
+                value={supportAmountInput}
+                onChange={(e) => setSupportAmountInput(e.target.value)}
+                placeholder={`Minimum ${supportAmountLabel}`}
+                style={{ width:"100%", padding:"14px 16px", borderRadius:16, outline:"none",
+                  border:`1px solid ${t.sideB}`, background:t.hover, color:t.text, fontSize:14, fontWeight:700 }}
+              />
+            </div>
             <div style={{ display:"grid", gridTemplateColumns: mobile ? "1fr" : "1fr 1fr", gap:10, marginBottom:14 }}>
-              <button onClick={handleRazorpaySupport} disabled={supportLoading}
+              <button onClick={handleRazorpaySupport} disabled={supportLoading || !supportAmountValid}
                 style={{ padding:"13px 16px", borderRadius:16, border:"none",
                   background:"linear-gradient(135deg,#0F172A,#1D4ED8)", color:"#fff",
-                  fontSize:13.5, fontWeight:800, opacity:supportLoading ? 0.7 : 1 }}>
-                {supportLoading ? "Opening Razorpay..." : `Pay with Razorpay (${supportOption.display})`}
+                  fontSize:13.5, fontWeight:800, opacity:(supportLoading || !supportAmountValid) ? 0.55 : 1,
+                  cursor:(supportLoading || !supportAmountValid) ? "not-allowed" : "pointer" }}>
+                {supportLoading ? "Opening Razorpay..." : "Pay with Razorpay"}
               </button>
-              <button onClick={handlePatreonSupport}
+              <button onClick={handlePatreonSupport} disabled={!supportAmountValid}
                 style={{ padding:"13px 16px", borderRadius:16, border:`1px solid ${t.sideB}`,
-                  background:t.hover, color:t.text, fontSize:13.5, fontWeight:800 }}>
+                  background:t.hover, color:t.text, fontSize:13.5, fontWeight:800,
+                  opacity:!supportAmountValid ? 0.55 : 1, cursor:!supportAmountValid ? "not-allowed" : "pointer" }}>
                 Support on Patreon
               </button>
-            </div>
-            <div style={{ fontSize:11.5, color:t.textMuted, lineHeight:1.6 }}>
-              Razorpay requires `VITE_RAZORPAY_KEY_ID`, `RAZORPAY_KEY_ID`, and `RAZORPAY_KEY_SECRET`. Patreon uses `VITE_PATREON_URL`.
             </div>
           </div>
         </div>
@@ -1607,7 +1658,7 @@ export default function Groovify() {
                 style={{ background:"none", border:"none",
                   fontSize:mobile?22:24, color:t.textSub }}>⏮</button>
               <button
-                onClick={() => { const a = audioRef.current; if (!a) return; a.paused ? a.play().catch(()=>{}) : a.pause(); }}
+                onClick={togglePlayback}
                 style={{ width:mobile?40:44, height:mobile?40:44, borderRadius:"50%",
                   background:"linear-gradient(135deg,#6366F1,#4F46E5)", border:"none",
                   color:"#fff", fontSize:mobile?18:20, flexShrink:0,

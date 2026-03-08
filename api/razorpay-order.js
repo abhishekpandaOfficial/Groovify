@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
 
   if (!keyId || !keySecret) {
-    res.status(500).json({ error: "Missing Razorpay server credentials." });
+    res.status(500).json({ error: "Payments are unavailable right now." });
     return;
   }
 
@@ -39,12 +39,12 @@ export default async function handler(req, res) {
 
     const payload = await response.json();
     if (!response.ok) {
-      res.status(response.status).json({ error: payload?.error?.description || "Unable to create Razorpay order." });
+      res.status(response.status).json({ error: "Unable to start payment right now." });
       return;
     }
 
     res.status(200).json(payload);
-  } catch (error) {
-    res.status(500).json({ error: error.message || "Unexpected server error." });
+  } catch {
+    res.status(500).json({ error: "Unable to start payment right now." });
   }
 }

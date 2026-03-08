@@ -1,25 +1,22 @@
+const searchLocalMusicApi = async (term, { iTunesLimit = 18, audiusLimit = 8, fullOnly = false } = {}) => {
+  const params = new URLSearchParams({
+    term,
+    itunesLimit: String(iTunesLimit),
+    audiusLimit: String(audiusLimit),
+    fullOnly: String(fullOnly),
+  });
+  const response = await fetch(`/api/music-search?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(`Music search failed with ${response.status}`);
+  }
+  const payload = await response.json();
+  return payload.songs || [];
+};
+
 // API utility functions
 const fetchItunes = async (term, limit = 20) => {
   try {
-    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=music&entity=song&limit=${limit}&country=in`;
-    const r = await fetch(url);
-    const d = await r.json();
-    return (d.results || []).filter(x => x.previewUrl).map(x => ({
-      id:        `it_${x.trackId}`,
-      title:     x.trackName || "Unknown",
-      artist:    x.artistName || "Unknown",
-      album:     x.collectionName || "Single",
-      artSm:     (x.artworkUrl60  || "").replace("60x60bb",   "120x120bb"),
-      art:       (x.artworkUrl100 || "").replace("100x100bb", "400x400bb"),
-      artBig:    (x.artworkUrl100 || "").replace("100x100bb", "600x600bb"),
-      audio:     x.previewUrl,
-      dur:       x.trackTimeMillis ? x.trackTimeMillis / 1000 : 30,
-      year:      x.releaseDate ? +x.releaseDate.slice(0, 4) : null,
-      genre:     x.primaryGenreName || "Music",
-      source:    "iTunes Preview",
-      storeUrl:  x.trackViewUrl,
-      isPreview: true,
-    }));
+    return await searchLocalMusicApi(term, { iTunesLimit: limit, audiusLimit: 0, fullOnly: false });
   } catch { return []; }
 };
 
@@ -57,25 +54,8 @@ const getAudiusStreamUrl = (trackId) =>
 
 const fetchAudius = async (term, limit = 10) => {
   try {
-    const r = await fetch(`${AUDIUS_HOST}/v1/tracks/search?query=${encodeURIComponent(term)}&limit=${limit}&app_name=Groovify`);
-    const d = await r.json();
-    return (d.data || []).filter(x => !x.is_delete && x.duration > 0).map(x => ({
-      id:        `au_${x.id}`,
-      audiusTrackId: x.id,
-      title:     x.title || "Unknown",
-      artist:    x.user?.name || "Unknown",
-      album:     x.album || "Single",
-      artSm:     x.artwork?.["150x150"] || "",
-      art:       x.artwork?.["480x480"] || x.artwork?.["150x150"] || "",
-      artBig:    x.artwork?.["1000x1000"] || x.artwork?.["480x480"] || "",
-      audio:     getAudiusStreamUrl(x.id),
-      dur:       x.duration || 180,
-      year:      x.release_date ? +x.release_date.slice(0, 4) : null,
-      genre:     x.genre || "Music",
-      source:    "Audius (Full)",
-      storeUrl:  `https://audius.co${x.permalink || ""}`,
-      isPreview: false,
-    }));
+    const songs = await searchLocalMusicApi(term, { iTunesLimit: 0, audiusLimit: limit, fullOnly: false });
+    return songs.map((song) => song.audiusTrackId ? { ...song, audio: getAudiusStreamUrl(song.audiusTrackId) } : song);
   } catch { return []; }
 };
 
@@ -90,9 +70,16 @@ const dedupe = arr => {
 
 const fetchBoth = async (term, iL = 18, aL = 8, options = {}) => {
   const { fullOnly = false } = options;
-  const [it, au] = await Promise.all([fetchItunes(term, iL), fetchAudius(term, aL)]);
-  const merged = dedupe([...au, ...it]);
-  return fullOnly ? merged.filter((song) => !song.isPreview) : merged;
+  try {
+    const songs = await searchLocalMusicApi(term, {
+      iTunesLimit: iL,
+      audiusLimit: aL,
+      fullOnly,
+    });
+    return dedupe(songs);
+  } catch {
+    return [];
+  }
 };
 
 const refreshSongStream = async (song) => {

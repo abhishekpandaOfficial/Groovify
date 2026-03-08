@@ -6,8 +6,8 @@ const CATALOG = [
   { key:"punjabi",    label:"🎵 Punjabi",    queries:["Punjabi hit songs","Diljit Dosanjh songs","Karan Aujla songs"],           cat:"punjabi" },
   { key:"tamil",      label:"🎭 Tamil",      queries:["Tamil hit songs","AR Rahman Tamil","Anirudh songs"],                     cat:"tamil" },
   { key:"kannada",    label:"🎶 Kannada",    queries:["Kannada hit songs","KGF songs","Ravi Basrur songs"],                     cat:"kannada" },
-  { key:"english",    label:"🌐 English",    queries:["English pop hits","global english songs","indie pop english"],            cat:"english" },
-  { key:"spanish",    label:"💃 Spanish",    queries:["Spanish pop hits","latin hits","reggaeton popular songs"],               cat:"spanish" },
+  { key:"english",    label:"🌐 English",    queries:["English pop hits","global english songs","indie pop english","UK top songs","US chart songs"], cat:"english" },
+  { key:"spanish",    label:"💃 Spanish",    queries:["Spanish pop hits","latin hits","reggaeton popular songs","musica latina popular","spanish romantic songs"], cat:"spanish" },
   { key:"afro",       label:"🔥 Afro",       queries:["Afrobeats hits","afro pop songs","nigerian hit songs"],                  cat:"afro" },
   { key:"folk",       label:"🪘 Folk",       queries:["Indian folk songs","Baul songs Bengal","Garba Gujarati folk"],            cat:"folk" },
   { key:"worldfolk",  label:"🌍 World Folk", queries:["Irish folk songs","Arabic folk songs","Latin folk songs"],               cat:"worldfolk" },
@@ -35,7 +35,7 @@ const INDUSTRIES = [
 ];
 
 const YEARS = [
-  { id:"2025", label:"2025", from:2025, to:2026 },
+  { id:"2025", label:"2025", from:2025, to:2025 },
   { id:"2024", label:"2024", from:2024, to:2024 },
   { id:"2023", label:"2023", from:2023, to:2023 },
   { id:"2022", label:"2022", from:2022, to:2022 },
