@@ -4,9 +4,11 @@ import { DARK, LIGHT } from "./config/themes";
 import Img from "./components/Img";
 import Skel from "./components/Skel";
 import Brand from "./components/Brand";
+import ArtistCard from "./components/ArtistCard";
 import SongCard from "./components/SongCard";
 import SongRow from "./components/SongRow";
 import { dedupe, fetchArtistInfo, fetchBoth, findPreviewFallback, refreshSongStream } from "./utils/api";
+import { buildArtistDirectory, filterAndSortArtists } from "./utils/artistDirectory";
 import { FEATURED_ARTISTS, formatArtistSong, normalizeArtistName } from "./utils/artistProfiles";
 import {
   fetchProfile,
@@ -111,6 +113,8 @@ export default function Groovify() {
   const [artistView,  setArtistView]  = useState(null);
   const [artistInfo,  setArtistInfo]  = useState(null);
   const [artistInfoTick, setArtistInfoTick] = useState(0);
+  const [artistSearch, setArtistSearch] = useState("");
+  const [artistSort, setArtistSort] = useState("name");
   const [loadingHome, setLoadingHome] = useState(true);
   const [loadingKey,  setLoadingKey]  = useState(null);
   const [searchQ,     setSearchQ]     = useState("");
@@ -1091,44 +1095,9 @@ export default function Groovify() {
         activeQueue[(activeQueueIndex + offset + 1 + activeQueue.length) % activeQueue.length]
       ).filter(Boolean)
     : [];
-  const artistsIndex = Array.from(new Map(
-    dedupe([
-      ...allSongs,
-      ...recentlyPlayed,
-    ])
-      .filter((song) => song.artist)
-      .map((song) => {
-        const normalizedName = normalizeArtistName(song.artist);
-        return [normalizedName.toLowerCase(), {
-          name: normalizedName,
-          art: song.artBig || song.art || song.artSm || "",
-          songs: dedupe(allSongs.filter((entry) =>
-            normalizeArtistName(entry.artist).toLowerCase() === normalizedName.toLowerCase()
-          )),
-        }];
-      })
-  ).values()).sort((a, b) => a.name.localeCompare(b.name));
   void artistInfoTick;
-  const allArtists = Array.from(new Map([
-    ...FEATURED_ARTISTS.map((name) => {
-      const normalizedName = normalizeArtistName(name);
-      const existing = artistsIndex.find((artist) => artist.name.toLowerCase() === normalizedName.toLowerCase());
-      const wikiInfo = artistInfoCacheRef.current.get(normalizedName.toLowerCase());
-      return [normalizedName.toLowerCase(), existing || {
-        name: normalizedName,
-        art: wikiInfo?.image || "",
-        songs: [],
-      }];
-    }),
-    ...artistsIndex.map((artist) => {
-      const wikiInfo = artistInfoCacheRef.current.get(artist.name.toLowerCase());
-      return [artist.name.toLowerCase(), {
-        ...artist,
-        art: wikiInfo?.image || artist.art,
-        description: wikiInfo?.description || "",
-      }];
-    }),
-  ]).values());
+  const allArtists = buildArtistDirectory(allSongs, recentlyPlayed, artistInfoCacheRef.current);
+  const visibleArtists = filterAndSortArtists(allArtists, artistSearch, artistSort);
   const currentArtistMeta = allArtists.find((artist) =>
     artistView && artist.name.toLowerCase() === normalizeArtistName(artistView).toLowerCase()
   );
@@ -1895,38 +1864,36 @@ export default function Groovify() {
                 <p style={{ fontSize:13, color:t.textMuted, marginBottom:22 }}>
                   Browse every artist discovered in Groovify and open their songs
                 </p>
+                <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:18 }}>
+                  <input
+                    value={artistSearch}
+                    onChange={(e) => setArtistSearch(e.target.value)}
+                    placeholder="Search any artist name"
+                    style={{ flex:"1 1 260px", minWidth:220, background:t.input, border:`1px solid ${t.inputB}`,
+                      borderRadius:16, padding:"11px 14px", color:t.text, fontSize:13.5, outline:"none" }}
+                  />
+                  <div style={{ display:"flex", gap:8 }}>
+                    {[
+                      { id:"name", label:"A-Z" },
+                      { id:"songs", label:"Most Songs" },
+                    ].map((option) => (
+                      <button key={option.id} onClick={() => setArtistSort(option.id)}
+                        style={{ padding:"10px 14px", borderRadius:16,
+                          border:`1px solid ${artistSort === option.id ? "#6366F1" : t.sideB}`,
+                          background:artistSort === option.id ? "rgba(99,102,241,.12)" : t.hover,
+                          color:artistSort === option.id ? "#6366F1" : t.textSub,
+                          fontSize:12.5, fontWeight:700 }}>
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ fontSize:12, color:t.textMuted, marginBottom:16 }}>
+                  {visibleArtists.length} artists
+                </div>
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))", gap:16 }}>
-                  {allArtists.map((artist) => (
-                    <button key={artist.name} onClick={() => loadArtist(artist.name)}
-                      style={{ textAlign:"left", padding:0, borderRadius:18, overflow:"hidden",
-                        border:`1px solid ${t.sideB}`, background:t.card, cursor:"pointer" }}>
-                      <div style={{ aspectRatio:"1", background:t.skelA }}>
-                        {artist.art
-                          ? <Img src={artist.art} style={{ width:"100%", height:"100%" }} />
-                          : <div style={{ width:"100%", height:"100%",
-                              background:"linear-gradient(135deg,#6366F1,#8B5CF6)",
-                              display:"flex", alignItems:"center", justifyContent:"center",
-                              fontSize:40, fontWeight:900, color:"#fff" }}>
-                              {artist.name[0]}
-                            </div>
-                        }
-                      </div>
-                      <div style={{ padding:"12px 14px 14px" }}>
-                        <div style={{ fontSize:14, fontWeight:700, color:t.text, marginBottom:4,
-                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {artist.name}
-                        </div>
-                        {artist.description && (
-                          <div style={{ fontSize:11.5, color:t.textSub, lineHeight:1.45, marginBottom:6,
-                            display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }}>
-                            {artist.description}
-                          </div>
-                        )}
-                        <div style={{ fontSize:11.5, color:t.textMuted }}>
-                          {artist.songs.length} songs
-                        </div>
-                      </div>
-                    </button>
+                  {visibleArtists.map((artist) => (
+                    <ArtistCard key={artist.name} artist={artist} t={t} onClick={() => loadArtist(artist.name)} />
                   ))}
                 </div>
               </div>

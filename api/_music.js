@@ -185,8 +185,19 @@ const fetchArtistInfo = async (artistName) => {
   if (cached) return cached;
 
   try {
-    const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(normalizedName)}`;
-    const summary = await fetchJson(summaryUrl);
+    const fetchSummary = async (title) =>
+      fetchJson(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+
+    let summary;
+    try {
+      summary = await fetchSummary(normalizedName);
+    } catch {
+      const search = await fetchJson(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(`${normalizedName} singer musician`)}&utf8=1&format=json&origin=*`);
+      const bestMatch = search?.query?.search?.[0]?.title;
+      if (!bestMatch) throw new Error("No artist summary found");
+      summary = await fetchSummary(bestMatch);
+    }
+
     const artistInfo = {
       name: summary.title || normalizedName,
       description: summary.description || "",
